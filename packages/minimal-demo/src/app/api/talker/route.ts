@@ -1,17 +1,17 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENROUTER_API_KEY || 'build-time-dummy-key',
-  baseURL: 'https://openrouter.ai/api/v1',
+const talkerClient = new OpenAI({
+  apiKey: process.env.CEREBRAS_API_KEY || 'build-time-dummy-key',
+  baseURL: 'https://api.cerebras.ai/v1',
 });
 
 export async function POST(request: Request) {
   try {
     const { messages } = await request.json();
 
-    const response = await openai.chat.completions.create({
-      model: 'cerebras/gpt-oss-120b',
+    const response = await talkerClient.chat.completions.create({
+      model: 'gpt-oss-120b',
       messages: [
         { 
           role: 'system', 
