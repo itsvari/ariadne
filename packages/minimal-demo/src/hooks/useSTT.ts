@@ -1,14 +1,15 @@
 import { DeepgramClient } from "@deepgram/sdk";
 import { useCallback, useRef, useState, useEffect } from "react";
 
-const ENDPOINTING_DURATION_MS = 300;
+const ENDPOINTING_DURATION_MS = 500;
 const RECORDING_TIMESLICE_MS = 250;
 
-export function useSTT(onUtteranceFinal: (text: string) => void) {
+export function useSTT(onUtteranceFinal: (text: string, speakerId?: number) => void) {
   const [isRecording, setIsRecording] = useState(false);
   const [interimResult, setInterimResult] = useState("");
+  const currentSpeakerRef = useRef<number | undefined>(undefined);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const connectionRef = useRef<Awaited<ReturnType<DeepgramClient['listen']['v1']['connect']>> | null>(null); // deepgram connection
+  const connectionRef = useRef<Awaited<ReturnType<DeepgramClient['listen']['v1']['connect']>> | null>(null); // deepgram v1 connection
 
   const startRecording = useCallback(async () => {
     try {
@@ -23,13 +24,14 @@ export function useSTT(onUtteranceFinal: (text: string) => void) {
       }
       
       const deepgram = new DeepgramClient({ apiKey });
-      // @ts-expect-error authorization header formatting type misdefinition within sdk bindings
+      // @ts-expect-error Authorization type issue in SDK
       const connection = await deepgram.listen.v1.connect({
-        model: "nova-2", 
+        model: "nova-3",
         language: "en",
         smart_format: "true",
         interim_results: "true",
         endpointing: ENDPOINTING_DURATION_MS,
+        diarize: "true",
       });
 
       connectionRef.current = connection;
@@ -45,13 +47,24 @@ export function useSTT(onUtteranceFinal: (text: string) => void) {
       });
 
       connection.on("message", (transcriptionPayload: unknown) => {
-        const data = transcriptionPayload as { type: string, is_final: boolean, channel: { alternatives: { transcript: string }[] } };
+        const data = transcriptionPayload as { 
+          type: string, 
+          is_final: boolean, 
+          channel: { alternatives: { transcript: string, words?: { speaker?: number }[] }[] } 
+        };
+        
         if (data.type === "Results") {
-           const transcript = data.channel.alternatives[0].transcript;
-           if (transcript !== "") {
+           const transcript = data.channel.alternatives[0]?.transcript;
+           const words = data.channel.alternatives[0]?.words;
+           
+           if (words && words.length > 0) {
+             currentSpeakerRef.current = words[words.length - 1].speaker;
+           }
+
+           if (transcript && transcript !== "") {
              if (data.is_final) {
                setInterimResult("");
-               setTimeout(() => onUtteranceFinal(transcript), 0);
+               setTimeout(() => onUtteranceFinal(transcript, currentSpeakerRef.current), 0);
              } else {
                setInterimResult(transcript);
              }

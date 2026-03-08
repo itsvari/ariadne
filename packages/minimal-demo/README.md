@@ -2,6 +2,14 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
+Create a local environment file before starting the app:
+
+```bash
+cp .env.example .env.local
+```
+
+Set `CEREBRAS_API_KEY` for the talker model and `NEXT_PUBLIC_DEEPGRAM_API_KEY` for speech-to-text.
+
 First, run the development server:
 
 ```bash
