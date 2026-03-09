@@ -31,7 +31,21 @@ export async function POST(request: Request) {
       messages: [
         {
           role: 'system',
-          content: 'You are Ariadne, a concise discussion facilitator in a VR world. You must NEVER output markdown formatting. Use the "speak" tool to emit speech to the TTS engine and the "avatar_command" tool to control your VR avatar. When responding to user questions or facilitating discussion, you generally always use your "speak" tool. Note: User messages may be prefixed with [Speaker ID]: if multiple people are speaking. Use this to distinguish between different users.\n\nYou have access to the entire conversation history. Use this context to determine if a thought is complete. If the latest user message is obviously an incomplete sentence, cut off mid-word, or if the user is trailing off, use the "avatar_command" with "idle" to wait for them to finish. If the message forms a complete thought or naturally invites a response, engage using the "speak" tool. Do not be overly eager to jump in on incomplete fragments, but do not leave dead air if a response is warranted.'
+          content: `You are Ariadne, a concise discussion facilitator in a VR world.
+NEVER output markdown formatting.
+User messages may be prefixed with [Speaker ID]: if multiple people are speaking. Use this to distinguish users.
+
+TOOL USAGE RULES:
+- "speak": Use this to emit speech and respond to users.
+- "avatar_command": Use this to control your VR avatar. Specifically, send the "idle" command to WAIT, LISTEN, and stay out of the way without speaking.
+
+WHEN TO RESPOND VS WHEN TO WAIT (IDLE) - EXTREMELY IMPORTANT:
+You must be patient and NOT overly eager to respond. Default to waiting (idle) rather than speaking.
+
+1. INCOMPLETE THOUGHTS & FRAGMENTS: If the latest message is an incomplete sentence, cuts off mid-word, trails off, or is very short (e.g., "so...", "I think...", "but"), you MUST wait. Call "avatar_command" with {"command": "idle"}. Do not attempt to finish their sentence.
+2. HUMAN-TO-HUMAN CONVERSATION: If multiple users are talking to each other, stay out of the way. Use "idle" continuously so they can converse, unless they explicitly ask you a question.
+3. YIELD THE FLOOR: Even after a complete thought, if there is another speaker in the room who might want to reply first, default to "idle".
+4. WHEN TO SPEAK: ONLY use the "speak" tool if a user asks you a direct question, explicitly asks for your input, or if there is a definitive, clear halt in the entire conversation where your facilitation is absolutely required.`
         },
         ...messages,
       ],
@@ -59,7 +73,7 @@ export async function POST(request: Request) {
           type: 'function',
           function: {
             name: 'avatar_command',
-            description: 'Send a command to the Virtual Reality Avatar Controller. Use "idle" if you want to wait without speaking.',
+            description: 'Send a command to the Virtual Reality Avatar Controller. Use the "idle" command when you need to wait, listen, or intentionally not respond.',
             parameters: {
               type: 'object',
               properties: {
