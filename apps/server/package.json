@@ -1,0 +1,29 @@
+{
+  "name": "apps-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@ariadne/chat-providers": "0.1.0",
+    "@ariadne/event-bus": "0.1.0",
+    "@ariadne/shared-belief-store": "0.1.0",
+    "@ariadne/shared-contracts": "0.1.0",
+    "@ariadne/talker": "0.1.0",
+    "@ariadne/thinker": "0.1.0",
+    "@ariadne/tts-client": "0.1.0",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/ws": "^8.18.1"
+  }
+}

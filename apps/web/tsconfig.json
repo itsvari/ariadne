@@ -1,0 +1,51 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "target": "ES2017",
+    "allowJs": true,
+    "noEmit": true,
+    "incremental": true,
+    "jsx": "preserve",
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@ariadne/shared-contracts": [
+        "../../packages/shared-contracts/src/index.ts"
+      ],
+      "@ariadne/chat-providers": [
+        "../../packages/chat-providers/src/index.ts"
+      ],
+      "@ariadne/shared-belief-store": [
+        "../../packages/shared-belief-store/src/index.ts"
+      ],
+      "@ariadne/event-bus": [
+        "../../packages/event-bus/src/index.ts"
+      ],
+      "@ariadne/talker": [
+        "../../packages/talker/src/index.ts"
+      ],
+      "@ariadne/thinker": [
+        "../../packages/thinker/src/index.ts"
+      ],
+      "@ariadne/tts-client": [
+        "../../packages/tts-client/src/index.ts"
+      ],
+      "@/*": [
+        "./src/*"
+      ]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}
