@@ -17,7 +17,7 @@ ariadne/
 │   ├── chat-providers/      # OpenRouter, Cerebras chat providers
 │   ├── talker/              # Talker model (System 1)
 │   ├── thinker/             # Thinker model (System 2)
-│   ├── shared-belief-store/ # Redis-backed belief store
+│   ├── shared-belief-store/ # Valkey-backed belief store
 │   ├── event-bus/           # Event routing between models
 │   └── tts-client/          # TTS integration
 ├── turbo.json
@@ -68,9 +68,9 @@ ariadne/
 
 ### 2.1 Create shared-belief-store package
 - [ ] Create `packages/shared-belief-store/package.json`
-- [ ] Add `ioredis` dependency
+- [ ] Add `iovalkey` dependency
 - [ ] Create `src/index.ts`:
-  - Connect to Redis (use `REDIS_URL` env var, default `localhost:6379`)
+  - Connect to Valkey (use `VALKEY_URL` env var, default `localhost:6379`)
   - Define key prefixes: `belief:`, `directives:`, `history:`, `world:`
   - Implement methods:
     - `readBeliefStore(sessionId): Promise<BeliefStore>`
@@ -93,7 +93,7 @@ ariadne/
     - `subscribe(eventType, handler)`
     - `publish(event)`
     - `requestResponse(eventType, timeout)`
-  - Use in-memory implementation for now (can swap for Redis pub/sub later)
+  - Use in-memory implementation for now (can swap for Valkey pub/sub later)
 
 ### 2.3 Create talker package
 - [ ] Create `packages/talker/package.json`
@@ -144,7 +144,7 @@ ariadne/
 - [ ] Add dependencies: express, ws, all packages
 - [ ] Create `src/index.ts`:
   - Express server setup
-  - Initialize Redis connection
+  - Initialize Valkey connection
   - Initialize chat providers (OpenRouter, Cerebras)
   - Create orchestrator instance
 - [ ] Create `src/orchestrator.ts`:
@@ -164,7 +164,7 @@ ariadne/
 
 ### 3.2 Wire up apps/server
 - [ ] Initialize all packages on startup
-- [ ] Verify Redis connectivity (health check on boot)
+- [ ] Verify Valkey connectivity (health check on boot)
 - [ ] Test OpenRouter API key presence
 
 ---
@@ -209,7 +209,7 @@ ariadne/
 - [ ] Update `.env.example` with:
   ```
   OPENROUTER_API_KEY=your_openrouter_api_key
-  REDIS_URL=redis://localhost:6379
+  VALKEY_URL=valkey://localhost:6379
   CEREBRAS_API_KEY=your_cerebras_api_key
   INWORLD_API_KEY=your_inworld_api_key
   DEEPGRAM_API_KEY=your_deepgram_api_key
@@ -217,7 +217,7 @@ ariadne/
 - [ ] Create `.env` with placeholder values for development
 
 ### 5.2 Testing
-- [ ] Verify Redis connection: `redis-cli ping`
+- [ ] Verify Valkey connection: `valkey-cli ping`
 - [ ] Test OpenRouter API call
 - [ ] Test Talker turn execution
 - [ ] Test Thinker turn execution
@@ -242,7 +242,7 @@ ariadne/
 | `packages/chat-providers/src/index.ts` | Provider exports |
 | `packages/chat-providers/src/openrouter.ts` | OpenRouter provider |
 | `packages/shared-belief-store/package.json` | Belief store package |
-| `packages/shared-belief-store/src/index.ts` | Redis belief store |
+| `packages/shared-belief-store/src/index.ts` | Valkey belief store |
 | `packages/event-bus/package.json` | Event bus package |
 | `packages/event-bus/src/index.ts` | Event routing |
 | `packages/talker/package.json` | Talker package |
@@ -274,7 +274,7 @@ ariadne/
 ## Dependencies
 
 ### Runtime
-- `ioredis` - Redis client (shared-belief-store)
+- `iovalkey` - Valkey client (shared-belief-store)
 - `openai` - OpenRouter uses OpenAI-compatible API (chat-providers)
 - `express` - HTTP server (apps/server)
 - `ws` - WebSocket server (apps/server)

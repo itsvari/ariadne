@@ -19,9 +19,9 @@ async function bootstrap(): Promise<void> {
 
   const server = http.createServer(app);
   const beliefStore = new SharedBeliefStore();
-  const redisHealthy = await beliefStore.healthCheck();
-  if (!redisHealthy) {
-    throw new Error('Redis health check failed');
+  const valkeyHealthy = await beliefStore.healthCheck();
+  if (!valkeyHealthy) {
+    throw new Error('Valkey health check failed');
   }
 
   const talkerProvider = new OpenRouterChatProvider();
@@ -41,7 +41,7 @@ async function bootstrap(): Promise<void> {
   app.get('/health', async (_req, res) => {
     res.json({
       ok: true,
-      redis: await beliefStore.healthCheck(),
+      valkey: await beliefStore.healthCheck(),
       openrouterConfigured: Boolean(process.env.OPENROUTER_API_KEY),
       cerebrasConfigured: Boolean(process.env.CEREBRAS_API_KEY),
       inworldConfigured: Boolean(process.env.INWORLD_API_KEY),

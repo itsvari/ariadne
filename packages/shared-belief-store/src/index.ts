@@ -1,4 +1,4 @@
-import Redis from 'ioredis';
+import Valkey from 'iovalkey';
 import {
   BeliefStoreSchema,
   DirectiveSchema,
@@ -11,13 +11,13 @@ import {
   type WorldState,
 } from '@ariadne/shared-contracts';
 
-const DEFAULT_REDIS_URL = 'redis://localhost:6379';
+const DEFAULT_VALKEY_URL = 'valkey://localhost:6379';
 
 export class SharedBeliefStore {
-  private redis: Redis;
+  private valkey: Valkey;
 
-  constructor(redisUrl = process.env.REDIS_URL ?? DEFAULT_REDIS_URL) {
-    this.redis = new Redis(redisUrl, {
+  constructor(valkeyUrl = process.env.VALKEY_URL ?? DEFAULT_VALKEY_URL) {
+    this.valkey = new Valkey(valkeyUrl, {
       lazyConnect: true,
       maxRetriesPerRequest: 1,
       enableOfflineQueue: false,
@@ -26,12 +26,12 @@ export class SharedBeliefStore {
 
   async healthCheck(): Promise<boolean> {
     await this.ensureConnected();
-    return (await this.redis.ping()) === 'PONG';
+    return (await this.valkey.ping()) === 'PONG';
   }
 
   async readBeliefStore(sessionId: string): Promise<BeliefStore> {
     await this.ensureConnected();
-    const raw = await this.redis.get(this.beliefKey(sessionId));
+    const raw = await this.valkey.get(this.beliefKey(sessionId));
     if (!raw) {
       return createEmptyBeliefStore();
     }
@@ -44,13 +44,13 @@ export class SharedBeliefStore {
       ...store,
       updatedAt: new Date().toISOString(),
     });
-    await this.redis.set(this.beliefKey(sessionId), JSON.stringify(nextStore));
+    await this.valkey.set(this.beliefKey(sessionId), JSON.stringify(nextStore));
   }
 
   async enqueueDirective(sessionId: string, directive: Directive): Promise<void> {
     await this.ensureConnected();
     const parsed = DirectiveSchema.parse(directive);
-    await this.redis.rpush(this.directivesKey(sessionId), JSON.stringify(parsed));
+    await this.valkey.rpush(this.directivesKey(sessionId), JSON.stringify(parsed));
     const store = await this.readBeliefStore(sessionId);
     await this.writeBeliefStore(sessionId, {
       ...store,
@@ -60,13 +60,13 @@ export class SharedBeliefStore {
 
   async dequeueDirective(sessionId: string): Promise<Directive | null> {
     await this.ensureConnected();
-    const raw = await this.redis.lpop(this.directivesKey(sessionId));
+    const raw = await this.valkey.lpop(this.directivesKey(sessionId));
     if (!raw) {
       return null;
     }
 
     const directive = DirectiveSchema.parse(JSON.parse(raw));
-    await this.redis.rpush(this.fulfilledKey(sessionId), JSON.stringify(directive));
+    await this.valkey.rpush(this.fulfilledKey(sessionId), JSON.stringify(directive));
     const store = await this.readBeliefStore(sessionId);
     await this.writeBeliefStore(sessionId, {
       ...store,
@@ -77,28 +77,28 @@ export class SharedBeliefStore {
 
   async getDirectives(sessionId: string): Promise<Directive[]> {
     await this.ensureConnected();
-    const raw = await this.redis.lrange(this.directivesKey(sessionId), 0, -1);
+    const raw = await this.valkey.lrange(this.directivesKey(sessionId), 0, -1);
     return raw.map((entry) => DirectiveSchema.parse(JSON.parse(entry)));
   }
 
   async getFulfilledDirectives(sessionId: string): Promise<Directive[]> {
     await this.ensureConnected();
-    const raw = await this.redis.lrange(this.fulfilledKey(sessionId), 0, -1);
+    const raw = await this.valkey.lrange(this.fulfilledKey(sessionId), 0, -1);
     return raw.map((entry) => DirectiveSchema.parse(JSON.parse(entry)));
   }
 
   async appendHistory(sessionId: string, utterance: Utterance): Promise<void> {
     await this.ensureConnected();
     const parsed = UtteranceSchema.parse(utterance);
-    await this.redis.rpush(this.historyKey(sessionId), JSON.stringify(parsed));
+    await this.valkey.rpush(this.historyKey(sessionId), JSON.stringify(parsed));
   }
 
   async getHistory(sessionId: string, limit?: number): Promise<Utterance[]> {
     await this.ensureConnected();
     const range =
       typeof limit === 'number'
-        ? await this.redis.lrange(this.historyKey(sessionId), -limit, -1)
-        : await this.redis.lrange(this.historyKey(sessionId), 0, -1);
+        ? await this.valkey.lrange(this.historyKey(sessionId), -limit, -1)
+        : await this.valkey.lrange(this.historyKey(sessionId), 0, -1);
 
     return range.map((entry) => UtteranceSchema.parse(JSON.parse(entry)));
   }
@@ -110,8 +110,8 @@ export class SharedBeliefStore {
       ...store,
       conversation_summary: summary,
     });
-    await this.redis.set(this.historySummaryKey(sessionId), summary);
-    await this.redis.ltrim(this.historyKey(sessionId), -20, -1);
+    await this.valkey.set(this.historySummaryKey(sessionId), summary);
+    await this.valkey.ltrim(this.historyKey(sessionId), -20, -1);
   }
 
   async setWorldState(sessionId: string, state: WorldState): Promise<void> {
@@ -120,18 +120,18 @@ export class SharedBeliefStore {
       ...state,
       updatedAt: state.updatedAt ?? new Date().toISOString(),
     });
-    await this.redis.set(this.worldKey(sessionId), JSON.stringify(parsed));
+    await this.valkey.set(this.worldKey(sessionId), JSON.stringify(parsed));
   }
 
   async getWorldState(sessionId: string): Promise<WorldState | null> {
     await this.ensureConnected();
-    const raw = await this.redis.get(this.worldKey(sessionId));
+    const raw = await this.valkey.get(this.worldKey(sessionId));
     return raw ? WorldStateSchema.parse(JSON.parse(raw)) : null;
   }
 
   async clearSession(sessionId: string): Promise<void> {
     await this.ensureConnected();
-    await this.redis.del(
+    await this.valkey.del(
       this.beliefKey(sessionId),
       this.directivesKey(sessionId),
       this.fulfilledKey(sessionId),
@@ -142,12 +142,12 @@ export class SharedBeliefStore {
   }
 
   async disconnect(): Promise<void> {
-    await this.redis.quit();
+    await this.valkey.quit();
   }
 
   private async ensureConnected(): Promise<void> {
-    if (this.redis.status === 'wait') {
-      await this.redis.connect();
+    if (this.valkey.status === 'wait') {
+      await this.valkey.connect();
     }
   }
 
