@@ -28,9 +28,15 @@ export type AvatarCommandEvent = EventEnvelope<
   Record<string, unknown>
 >;
 
+export type EndOfTurnEvent = EventEnvelope<
+  'EndOfTurn',
+  { speakerId: string; text: string; turnIndex: number }
+>;
+
 export type EventBusEvent =
   | UtteranceFinalEvent
   | UtteranceChunkEvent
+  | EndOfTurnEvent
   | WorldStateUpdateEvent
   | ReasonerCompleteEvent
   | TalkerWaitFlagEvent

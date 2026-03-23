@@ -5,7 +5,7 @@ import { Activity, BrainCircuit, Mic, MicOff, Play, Power, Radio, Sparkles } fro
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import type { BeliefStore } from '@ariadne/shared-contracts';
-import { useSTT } from '../hooks/useSTT';
+import { useFluxSTT } from '../hooks/useFluxSTT';
 import { DEFAULT_SERVER_URL, eventSocketUrl, serverUrl } from '../lib/server';
 import type { DashboardState, Message, SessionEvent, SessionStatusView, SystemEvent } from '../lib/types';
 
@@ -332,7 +332,7 @@ export default function AriadneControlPanel() {
     }
   }, [addEvent, refreshDashboard, sessionId]);
 
-  const { isRecording, interimResult, startRecording, stopRecording } = useSTT(sendUtterance);
+  const { isRecording, interimResults, startRecording, stopRecording } = useFluxSTT(sendUtterance);
 
   const stats = useMemo(
     () => [
@@ -478,7 +478,7 @@ export default function AriadneControlPanel() {
 
               <div className="mt-6 flex flex-wrap items-center gap-3">
                 <button
-                  onClick={isRecording ? stopRecording : startRecording}
+                  onClick={isRecording ? stopRecording : () => void startRecording()}
                   className={cn(
                     'inline-flex items-center gap-2 rounded-full px-5 py-3 text-sm font-medium transition',
                     isRecording
@@ -496,7 +496,13 @@ export default function AriadneControlPanel() {
                   <Play className="h-4 w-4" />
                   {audioReady ? 'Audio ready' : 'Prime audio'}
                 </button>
-                {interimResult && <span className="mono text-xs text-[var(--accent-warm)]">Listening: {interimResult}</span>}
+                {interimResults.size > 0 && (
+                  <span className="mono text-xs text-[var(--accent-warm)]">
+                    {Array.from(interimResults.entries()).map(([speaker, text]) => (
+                      <span key={speaker} className="mr-3">[{speaker}]: {text}</span>
+                    ))}
+                  </span>
+                )}
               </div>
             </section>
 
