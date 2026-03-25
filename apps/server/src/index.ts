@@ -50,7 +50,7 @@ async function bootstrap(): Promise<void> {
 
   app.post('/session/start', async (req, res) => {
     try {
-      const sessionId = String(req.body.sessionId ?? crypto.randomUUID());
+      const sessionId = crypto.randomUUID();
       const status = await orchestrator.startSession(sessionId, req.body.sessionConfig ?? {});
       res.json(status);
     } catch (error) {
