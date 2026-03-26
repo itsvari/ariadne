@@ -1,7 +1,7 @@
 # Project Ariadne — Implementation Plan
 
 > Created: March 2026
-> Status: Phase 1–3 complete. Phase 4 partially complete.
+> Status: Phase 1–5 complete.
 
 ---
 
@@ -133,7 +133,7 @@ ariadne/
 
 ---
 
-## Phase 4: Control Panel GUI (apps/web)
+## Phase 4: Control Panel GUI (apps/web) ✅
 
 ### 4.1 Base setup ✅
 - [x] Next.js 16 app refactored from minimal-demo
@@ -143,11 +143,11 @@ ariadne/
 - [x] Message history display
 
 ### 4.2 Control panel features
-- [ ] Session status indicators (talker/thinker status, last Thinker run timestamp)
-- [ ] Belief store visualisation (participants, discussion phase, facilitation plan)
-- [ ] Directive queue display (pending / fulfilled)
-- [ ] Control buttons: Start/Stop, manual Thinker trigger, intervention mode selector, Thinker interval slider
-- [ ] Enhanced system events log
+- [x] Session status indicators (talker/thinker status, last Thinker run timestamp)
+- [x] Belief store visualisation (participants, discussion phase, facilitation plan)
+- [x] Directive queue display (pending / fulfilled)
+- [x] Control buttons: Start/Stop, manual Thinker trigger, intervention mode selector, Thinker interval slider
+- [x] Enhanced system events log
 
 ---
 
