@@ -18,7 +18,7 @@ import {
 } from '@ariadne/shared-contracts';
 import { runTalkerTurn } from '@ariadne/talker';
 import { runThinkerTurn, startThinkerScheduler, type ThinkerSchedulerControls } from '@ariadne/thinker';
-import { InworldTTSProvider, synthesizeSpeech } from '@ariadne/tts-client';
+import { DeepgramTTSProvider, synthesizeSpeech } from '@ariadne/tts-client';
 
 export interface SessionStatus {
   sessionId: string;
@@ -45,7 +45,7 @@ export interface AriadneOrchestratorOptions {
   beliefStore: SharedBeliefStore;
   talkerProvider?: ChatProvider;
   thinkerProvider?: ChatProvider;
-  ttsProvider?: InworldTTSProvider;
+  ttsProvider?: DeepgramTTSProvider;
 }
 
 export class AriadneOrchestrator {
@@ -55,7 +55,7 @@ export class AriadneOrchestrator {
   private beliefStore: SharedBeliefStore;
   private talkerProvider: ChatProvider;
   private thinkerProvider: ChatProvider;
-  private ttsProvider: InworldTTSProvider;
+  private ttsProvider: DeepgramTTSProvider;
 
   constructor(options: AriadneOrchestratorOptions) {
     this.beliefStore = options.beliefStore;
@@ -65,7 +65,7 @@ export class AriadneOrchestrator {
       (process.env.CEREBRAS_API_KEY
         ? new CerebrasChatProvider()
         : this.talkerProvider);
-    this.ttsProvider = options.ttsProvider ?? new InworldTTSProvider();
+    this.ttsProvider = options.ttsProvider ?? new DeepgramTTSProvider();
 
     this.wsServer = new WebSocketServer({ noServer: true });
     options.httpServer.on('upgrade', (request, socket, head) => {

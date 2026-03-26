@@ -1,3 +1,4 @@
+// @ts-ignore
 import Valkey from 'iovalkey';
 import {
   BeliefStoreSchema,
@@ -78,13 +79,13 @@ export class SharedBeliefStore {
   async getDirectives(sessionId: string): Promise<Directive[]> {
     await this.ensureConnected();
     const raw = await this.valkey.lrange(this.directivesKey(sessionId), 0, -1);
-    return raw.map((entry) => DirectiveSchema.parse(JSON.parse(entry)));
+    return raw.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry)));
   }
 
   async getFulfilledDirectives(sessionId: string): Promise<Directive[]> {
     await this.ensureConnected();
     const raw = await this.valkey.lrange(this.fulfilledKey(sessionId), 0, -1);
-    return raw.map((entry) => DirectiveSchema.parse(JSON.parse(entry)));
+    return raw.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry)));
   }
 
   async appendHistory(sessionId: string, utterance: Utterance): Promise<void> {
@@ -100,7 +101,7 @@ export class SharedBeliefStore {
         ? await this.valkey.lrange(this.historyKey(sessionId), -limit, -1)
         : await this.valkey.lrange(this.historyKey(sessionId), 0, -1);
 
-    return range.map((entry) => UtteranceSchema.parse(JSON.parse(entry)));
+    return range.map((entry: string) => UtteranceSchema.parse(JSON.parse(entry)));
   }
 
   async compactHistory(sessionId: string, summary: string): Promise<void> {

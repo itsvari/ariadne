@@ -1,12 +1,12 @@
 import { NextRequest } from 'next/server';
 import { TTSRequestSchema } from '@ariadne/shared-contracts';
-import { InworldTTSProvider, synthesizeSpeech } from '@ariadne/tts-client';
+import { DeepgramTTSProvider, synthesizeSpeech } from '@ariadne/tts-client';
 
-let provider: InworldTTSProvider | null = null;
+let provider: DeepgramTTSProvider | null = null;
 
-function getProvider(): InworldTTSProvider {
+function getProvider(): DeepgramTTSProvider {
   if (!provider) {
-    provider = new InworldTTSProvider();
+    provider = new DeepgramTTSProvider();
   }
   return provider;
 }

@@ -1,26 +1,27 @@
 import WebSocket from 'ws';
 import type { TTSProvider, TTSRequest } from '@ariadne/shared-contracts';
 
-const INWORLD_WS_URL = 'wss://api.inworld.ai/tts/v1/voice:streamBidirectional';
+const DEEPGRAM_WS_URL = 'wss://api.deepgram.com/v1/speak';
 
-export class InworldTTSProvider implements TTSProvider {
+export class DeepgramTTSProvider implements TTSProvider {
   private apiKey: string;
 
   constructor(apiKey?: string) {
-    const key = apiKey ?? process.env.INWORLD_API_KEY;
+    const key = apiKey ?? process.env.DEEPGRAM_API_KEY;
     if (!key) {
-      throw new Error('INWORLD_API_KEY is not configured');
+      throw new Error('DEEPGRAM_API_KEY is not configured');
     }
     this.apiKey = key;
   }
 
   synthesize(
     text: string,
-    options?: { voiceId?: string; format?: string },
+    options?: { voiceId?: string; format?: string; sampleRate?: number },
   ): Promise<ReadableStream<Uint8Array>> {
-    const voiceId = options?.voiceId ?? 'Clive';
-    const format = (options?.format ?? 'mp3').toUpperCase();
-    const authHeader = this.apiKey.startsWith('Basic') ? this.apiKey : `Basic ${this.apiKey}`;
+    const model = options?.voiceId ?? 'aura-2-thalia-en';
+    const encoding = options?.format ?? 'linear16';
+    const sampleRate = options?.sampleRate ?? 24000;
+    const apiKey = this.apiKey;
 
     return Promise.resolve(
       new ReadableStream<Uint8Array>({
@@ -39,63 +40,40 @@ export class InworldTTSProvider implements TTSProvider {
             }
           };
 
-          const socket = new WebSocket(INWORLD_WS_URL, {
-            headers: { Authorization: authHeader },
+          const wsUrl = `${DEEPGRAM_WS_URL}?model=${encodeURIComponent(model)}&encoding=${encodeURIComponent(encoding)}&sample_rate=${sampleRate}`;
+          const socket = new WebSocket(wsUrl, {
+            headers: { Authorization: `Token ${apiKey}` },
           });
-          const contextId = crypto.randomUUID();
 
           socket.on('open', () => {
             socket.send(
               JSON.stringify({
-                context_id: contextId,
-                create: {
-                  voice_id: voiceId,
-                  model_id: 'inworld-tts-1.5-mini',
-                  audio_config: {
-                    audio_encoding: format,
-                    sample_rate_hertz: 24000,
-                  },
-                },
+                type: 'Speak',
+                text,
               }),
             );
-            socket.send(
-              JSON.stringify({
-                context_id: contextId,
-                send_text: { text, flush_context: {} },
-              }),
-            );
-            socket.send(JSON.stringify({ context_id: contextId, close_context: {} }));
+            socket.send(JSON.stringify({ type: 'Flush' }));
           });
 
-          socket.on('message', (data: Buffer) => {
-            try {
-              const message = JSON.parse(data.toString()) as {
-                error?: { message?: string };
-                result?: {
-                  audioChunk?: { audioContent?: string };
-                  audioContent?: string;
-                  contextClosed?: boolean;
-                };
-                done?: boolean;
-              };
+          socket.on('message', (data: WebSocket.Data) => {
+            if (Buffer.isBuffer(data)) {
+              controller.enqueue(new Uint8Array(data));
+            } else if (typeof data === 'string') {
+              try {
+                const message = JSON.parse(data) as { type?: string; err_msg?: string };
 
-              if (message.error?.message) {
-                controller.error(new Error(message.error.message));
-                socket.close();
-                return;
+                if (message.type === 'Error') {
+                  controller.error(new Error(message.err_msg ?? 'Deepgram error'));
+                  socket.close();
+                } else if (message.type === 'Flushed') {
+                  socket.send(JSON.stringify({ type: 'Close' }));
+                } else if (message.type === 'Close') {
+                  closeStream();
+                  socket.close();
+                }
+              } catch {
+                // no-op
               }
-
-              const chunk = message.result?.audioChunk?.audioContent ?? message.result?.audioContent;
-              if (chunk) {
-                controller.enqueue(Buffer.from(chunk, 'base64'));
-              }
-
-              if (message.result?.contextClosed || message.done) {
-                closeStream();
-                socket.close();
-              }
-            } catch {
-              // no-op
             }
           });
 

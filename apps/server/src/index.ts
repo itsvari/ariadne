@@ -4,7 +4,7 @@ import express from 'express';
 import { DeepgramClient } from '@deepgram/sdk';
 import { SharedBeliefStore } from '@ariadne/shared-belief-store';
 import { OpenRouterChatProvider, CerebrasChatProvider } from '@ariadne/chat-providers';
-import { InworldTTSProvider } from '@ariadne/tts-client';
+import { DeepgramTTSProvider } from '@ariadne/tts-client';
 import { AriadneOrchestrator } from './orchestrator';
 
 const PORT = Number(process.env.PORT ?? 8081);
@@ -29,7 +29,7 @@ async function bootstrap(): Promise<void> {
   const thinkerProvider = process.env.CEREBRAS_API_KEY
     ? new CerebrasChatProvider()
     : talkerProvider;
-  const ttsProvider = new InworldTTSProvider();
+  const ttsProvider = new DeepgramTTSProvider();
   const deepgram = process.env.DEEPGRAM_API_KEY
     ? new DeepgramClient({ apiKey: process.env.DEEPGRAM_API_KEY })
     : undefined;
@@ -48,7 +48,7 @@ async function bootstrap(): Promise<void> {
       valkey: await beliefStore.healthCheck(),
       openrouterConfigured: Boolean(process.env.OPENROUTER_API_KEY),
       cerebrasConfigured: Boolean(process.env.CEREBRAS_API_KEY),
-      inworldConfigured: Boolean(process.env.INWORLD_API_KEY),
+      deepgramTTSConfigured: Boolean(process.env.DEEPGRAM_API_KEY),
     });
   });
 
