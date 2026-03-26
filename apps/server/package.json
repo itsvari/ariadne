@@ -17,6 +17,7 @@
     "@ariadne/talker": "0.1.0",
     "@ariadne/thinker": "0.1.0",
     "@ariadne/tts-client": "0.1.0",
+    "@deepgram/sdk": "^5.0.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "ws": "^8.19.0"

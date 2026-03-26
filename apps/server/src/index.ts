@@ -1,6 +1,7 @@
 import http from 'http';
 import cors from 'cors';
 import express from 'express';
+import { DeepgramClient } from '@deepgram/sdk';
 import { SharedBeliefStore } from '@ariadne/shared-belief-store';
 import { OpenRouterChatProvider, CerebrasChatProvider } from '@ariadne/chat-providers';
 import { InworldTTSProvider } from '@ariadne/tts-client';
@@ -15,7 +16,7 @@ async function bootstrap(): Promise<void> {
 
   const app = express();
   app.use(cors());
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '10mb' }));
 
   const server = http.createServer(app);
   const beliefStore = new SharedBeliefStore();
@@ -29,6 +30,9 @@ async function bootstrap(): Promise<void> {
     ? new CerebrasChatProvider()
     : talkerProvider;
   const ttsProvider = new InworldTTSProvider();
+  const deepgram = process.env.DEEPGRAM_API_KEY
+    ? new DeepgramClient({ apiKey: process.env.DEEPGRAM_API_KEY })
+    : undefined;
 
   const orchestrator = new AriadneOrchestrator({
     httpServer: server,
@@ -80,6 +84,43 @@ async function bootstrap(): Promise<void> {
         speakerId: req.body.speakerId ? String(req.body.speakerId) : undefined,
       });
       res.json({ ok: true });
+    } catch (error) {
+      res.status(500).json({ error: toErrorMessage(error) });
+    }
+  });
+
+  app.post('/utterance/audio', async (req, res) => {
+    try {
+      if (!deepgram) {
+        res.status(503).json({ error: 'DEEPGRAM_API_KEY is not configured on the server.' });
+        return;
+      }
+
+      const sessionId = String(req.body.sessionId ?? '');
+      const speakerId = req.body.speakerId ? String(req.body.speakerId) : undefined;
+      const audioBase64 = String(req.body.audioBase64 ?? '');
+
+      if (!audioBase64) {
+        res.status(400).json({ error: 'No audio data received.' });
+        return;
+      }
+
+      const audioBuffer = Buffer.from(audioBase64, 'base64');
+      const result = await deepgram.listen.v1.media.transcribeFile(audioBuffer, {
+        model: 'nova-3',
+        encoding: 'linear16',
+      });
+
+      const transcript = 'results' in result
+        ? result.results?.channels[0]?.alternatives?.[0]?.transcript?.trim()
+        : undefined;
+      if (!transcript) {
+        res.json({ ok: true, transcript: '' });
+        return;
+      }
+
+      await orchestrator.handleUtterance({ sessionId, text: transcript, speakerId });
+      res.json({ ok: true, transcript });
     } catch (error) {
       res.status(500).json({ error: toErrorMessage(error) });
     }
