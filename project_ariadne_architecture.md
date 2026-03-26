@@ -23,8 +23,8 @@ The system will be built primarily in **TypeScript**, including orchestration, s
 Ariadne follows the **Talker-Reasoner** dual-agent pattern, inspired by Kahneman's System 1/System 2 cognitive model and formalised in DeepMind's 2024 paper of the same name.
 
 - The **Talker** (System 1) is a fast, small-to-medium LLM. It reacts to conversation events in near real-time, producing speech and reactive avatar commands.
-- The **Reasoner** (System 2) is a capable, slower LLM. It runs periodically (~every 60 seconds) or on-demand, analyses the full conversation and world state, and updates a shared belief store with strategic guidance for the Talker.
-- Both agents communicate primarily through a **Shared Belief Store**. The Reasoner writes; the Talker reads.
+- The **Reasoner/Thinker** (System 2) is a capable, slower LLM. It runs periodically (~every 60 seconds) or on-demand, analyses the full conversation and world state, and updates a shared belief store with strategic guidance for the Talker. **Note:** the architecture literature refers to this agent as the "Reasoner"; the codebase uses "Thinker" throughout.
+- Both agents communicate primarily through a **Shared Belief Store**. The Reasoner/Thinker writes; the Talker reads.
 
 ### 2.2 High-Level Data Flow
 
@@ -50,18 +50,19 @@ Ariadne follows the **Talker-Reasoner** dual-agent pattern, inspired by Kahneman
 
 The codebase should be organised in a monorepo-like structure, with each major subsystem owning its own folder or package. This keeps runtime concerns, deployment boundaries, and interface contracts explicit.
 
-**Indicative layout:**
+**Actual layout (as built):**
 
-- `packages/input-pipeline`
-- `packages/event-bus`
-- `packages/talker`
-- `packages/reasoner`
-- `packages/shared-belief-store`
-- `packages/avatar-controller-client`
-- `packages/tts-client`
-- `packages/shared-contracts`
+- `apps/web` — Next.js control panel
+- `apps/server` — Node.js orchestration server
+- `packages/shared-contracts` — TypeScript types and Zod schemas
+- `packages/chat-providers` — OpenRouter and Cerebras chat providers
+- `packages/talker` — Talker agent (System 1)
+- `packages/thinker` — Thinker agent (System 2, called "Reasoner" in the pattern literature)
+- `packages/shared-belief-store` — Valkey-backed belief store
+- `packages/event-bus` — In-process event routing
+- `packages/tts-client` — Deepgram TTS streaming integration
 
-Shared TypeScript types and schemas should live in a dedicated shared package so that event definitions, belief store structures, and command contracts remain versioned in one place.
+Shared TypeScript types and schemas live in `packages/shared-contracts` so that event definitions, belief store structures, and command contracts remain versioned in one place.
 
 ---
 
@@ -171,7 +172,9 @@ In all other cases, the Talker proceeds with the most recent available belief st
 
 ---
 
-### 3.5 Reasoner Model (System 2)
+### 3.5 Thinker Model (System 2)
+
+> **Note:** This agent is called "Thinker" in the codebase and "Reasoner" in the academic pattern. The terms refer to the same component.
 
 **Responsibilities:**
 
@@ -321,13 +324,13 @@ All prompt templates for the Talker and Reasoner, the belief store schema, and t
 
 Items deferred for future design sessions:
 
-- [ ] Belief store full schema definition
-- [ ] STT provider and latency profile
-- [ ] Talker and Reasoner model selection
-- [ ] Event Bus technology choice (e.g., in-process queue vs. message broker)
+- [x] ~~Belief store full schema definition~~ — implemented in `packages/shared-contracts`
+- [ ] STT provider and latency profile — currently using Deepgram Nova-3 (server-side batch); streaming STT not yet wired
+- [ ] Talker and Reasoner model selection — currently configurable via env vars
+- [x] ~~Event Bus technology choice~~ — in-process EventEmitter-based bus in `packages/event-bus`
 - [ ] Exact token thresholds triggering history compaction
 - [ ] Avatar command vocabulary finalisation (with Avatar Controller team)
-- [ ] TTS provider and streaming interface
-- [ ] Session persistence storage technology
+- [x] ~~TTS provider and streaming interface~~ — Deepgram Aura WebSocket streaming in `packages/tts-client`
+- [x] ~~Session persistence storage technology~~ — Valkey (Redis-compatible) via `packages/shared-belief-store`
 - [ ] Multi-session memory (should the AI remember participants across separate sessions?)
 - [ ] Moderator override interface (ability for a human operator to inject directives)

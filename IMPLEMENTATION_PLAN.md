@@ -1,7 +1,7 @@
-# Project Ariadne - Implementation Plan
+# Project Ariadne — Implementation Plan
 
 > Created: March 2026
-> Status: Ready for execution
+> Status: Phase 1–3 complete. Phase 4 partially complete.
 
 ---
 
@@ -10,8 +10,8 @@
 ```
 ariadne/
 ├── apps/
-│   ├── web/          # Next.js control panel (refactored from minimal-demo)
-│   └── server/      # Node.js orchestration server
+│   ├── web/          # Next.js control panel
+│   └── server/       # Node.js orchestration server
 ├── packages/
 │   ├── shared-contracts/    # TypeScript types, Zod schemas
 │   ├── chat-providers/      # OpenRouter, Cerebras chat providers
@@ -19,278 +19,190 @@ ariadne/
 │   ├── thinker/             # Thinker model (System 2)
 │   ├── shared-belief-store/ # Valkey-backed belief store
 │   ├── event-bus/           # Event routing between models
-│   └── tts-client/          # TTS integration
+│   └── tts-client/          # Deepgram TTS integration
 ├── turbo.json
-├── package.json              # Root with turborepo setup
+├── package.json              # Root with Turborepo workspace config
 └── .env                     # Shared env vars
 ```
 
 ---
 
-## Phase 1: Monorepo Setup
+## Phase 1: Monorepo Setup ✅
 
 ### 1.1 Set up Turborepo
-- [ ] Create root `package.json` with turborepo workspace config
-- [ ] Create `turbo.json` configuration
-- [ ] Create `tsconfig.json` base configuration
-- [ ] Move `packages/minimal-demo/` → `apps/web/`
-- [ ] Update internal package.json references
+- [x] Create root `package.json` with Turborepo workspace config
+- [x] Create `turbo.json` configuration
+- [x] Create `tsconfig.json` base configuration
+- [x] Move `packages/minimal-demo/` → `apps/web/`
+- [x] Update internal package.json references
 
 ### 1.2 Create shared-contracts package
-- [ ] Create `packages/shared-contracts/package.json`
-- [ ] Create `packages/shared-contracts/src/index.ts` - exports all types
-- [ ] Move/refactor existing schemas from `contracts/ai.ts`:
+- [x] Create `packages/shared-contracts/package.json`
+- [x] Create `packages/shared-contracts/src/index.ts` — exports all types
+- [x] Core schemas:
   - `InterventionMode`, `SessionConfig`, `ChatMessage`
-  - `TalkerRequest`, `TalkerResponse`, `TTSRequest`
+  - `TalkerRequest`, `TalkerResponse`, `TTSRequest`, `TTSProvider`
   - `WsMessage`, `TelemetryEvent`
-- [ ] Add Thinker schemas:
-  - `BeliefStore` - participants, discussion_state, facilitation_plan, directive_queue, conversation_summary
-  - `Participant` - id, speakingFrequency, stance, emotionalTone, engagementLevel
-  - `DiscussionState` - currentTopic, phase, openQuestions
-  - `Directive` - id, instruction, priority, createdAt
-  - `WorldState` - players, location, activities
-- [ ] Add tool call schemas:
-  - Talker tools: `speak`, `avatar_command`, `trigger_reasoner`, `wait_for_reasoner`, `read_belief_store`, `dequeue_directive`
+- [x] Thinker schemas:
+  - `BeliefStore` — participants, discussion_state, facilitation_plan, directive_queue, conversation_summary
+  - `Participant` — id, speakingFrequency, stance, emotionalTone, engagementLevel
+  - `DiscussionState` — currentTopic, phase, openQuestions
+  - `Directive` — id, instruction, priority, createdAt
+  - `WorldState` — players, location, activities
+- [x] Tool call schemas:
+  - Talker tools: `speak`, `avatar_command`, `trigger_thinker`, `wait_for_thinker`, `read_belief_store`, `dequeue_directive`
   - Thinker tools: `write_belief_store`, `enqueue_directive`, `read_world_state`, `compact_history`, `avatar_command`
 
 ### 1.3 Create chat-providers package
-- [ ] Create `packages/chat-providers/package.json`
-- [ ] Create `packages/chat-providers/src/index.ts` - exports providers
-- [ ] Move/refactor `CerebrasChatProvider` from existing code
-- [ ] Create `OpenRouterChatProvider`:
-  - Use model string: `openrouter/hunter-alpha`
-  - Implement `ChatProvider` interface
-  - Use OpenAI-compatible API with custom base URL
+- [x] Create `packages/chat-providers/package.json`
+- [x] Create `packages/chat-providers/src/index.ts` — exports providers
+- [x] Implement `CerebrasChatProvider`
+- [x] Create `OpenRouterChatProvider`:
+  - Uses OpenAI-compatible API with custom base URL
+  - Implements `ChatProvider` interface
+  - Model configurable via `OPENROUTER_MODEL` env var
 
 ---
 
-## Phase 2: Core Services
+## Phase 2: Core Services ✅
 
 ### 2.1 Create shared-belief-store package
-- [ ] Create `packages/shared-belief-store/package.json`
-- [ ] Add `iovalkey` dependency
-- [ ] Create `src/index.ts`:
-  - Connect to Valkey (use `VALKEY_URL` env var, default `localhost:6379`)
-  - Define key prefixes: `belief:`, `directives:`, `history:`, `world:`
-  - Implement methods:
-    - `readBeliefStore(sessionId): Promise<BeliefStore>`
-    - `writeBeliefStore(sessionId, store): Promise<void>`
-    - `enqueueDirective(sessionId, directive): Promise<void>`
-    - `dequeueDirective(sessionId): Promise<Directive | null>`
-    - `getDirectives(sessionId): Promise<Directive[]>`
-    - `appendHistory(sessionId, utterance): Promise<void>`
-    - `getHistory(sessionId, limit?): Promise<Utterance[]>`
-    - `compactHistory(sessionId, summary): Promise<void>`
-    - `setWorldState(sessionId, state): Promise<void>`
-    - `getWorldState(sessionId): Promise<WorldState | null>`
-  - Add connection health check
+- [x] Create `packages/shared-belief-store/package.json`
+- [x] Add `iovalkey` dependency
+- [x] Implement Valkey-backed store with key prefixes: `belief:`, `directives:`, `history:`, `world:`
+- [x] Methods: `readBeliefStore`, `writeBeliefStore`, `enqueueDirective`, `dequeueDirective`, `getDirectives`, `getFulfilledDirectives`, `appendHistory`, `getHistory`, `compactHistory`, `setWorldState`, `getWorldState`, `healthCheck`
 
 ### 2.2 Create event-bus package
-- [ ] Create `packages/event-bus/package.json`
-- [ ] Create `src/index.ts`:
-  - Define event types: `UtteranceFinal`, `UtteranceChunk`, `WorldStateUpdate`, `ReasonerComplete`, `TalkerWaitFlag`, `AvatarCommand`
-  - Create `EventBus` class with:
-    - `subscribe(eventType, handler)`
-    - `publish(event)`
-    - `requestResponse(eventType, timeout)`
-  - Use in-memory implementation for now (can swap for Valkey pub/sub later)
+- [x] Create `packages/event-bus/package.json`
+- [x] Create `src/index.ts`:
+  - Event types: `UtteranceFinal`, `UtteranceChunk`, `WorldStateUpdate`, `ReasonerComplete`, `TalkerWaitFlag`, `AvatarCommand`
+  - `EventBus` class with `subscribe`, `publish`, `requestResponse`
+  - In-memory implementation (can swap for Valkey pub/sub later)
 
 ### 2.3 Create talker package
-- [ ] Create `packages/talker/package.json`
-- [ ] Create `src/index.ts`:
-  - Import tool definitions from shared-contracts
-  - Create system prompts per intervention mode (control, light, heavy)
-  - Implement `runTalkerTurn()` function:
-    - Accept: provider, request (messages, beliefSnapshot, directives, worldState, sessionConfig)
-    - Return: ChatCompletionResult
-  - Tool implementations:
-    - `speak` - emit text to TTS
-    - `avatar_command` - send to avatar controller
-    - `trigger_reasoner` - publish Reasoner trigger event
-    - `wait_for_reasoner` - block until Reasoner completes
-    - `read_belief_store` - fetch from belief store
-    - `dequeue_directive` - pop from directive queue
-  - Add telemetry emission
+- [x] Create `packages/talker/package.json`
+- [x] Create `src/index.ts`:
+  - System prompts per intervention mode (`control`, `light`, `heavy`)
+  - `runTalkerTurn()` function
+  - Tool call implementations
+  - Telemetry emission
 
 ### 2.4 Create thinker package
-- [ ] Create `packages/thinker/package.json`
-- [ ] Create `src/index.ts`:
-  - Define system prompt for strategic reasoning
-  - Implement `runThinkerTurn()` function:
-    - Accept: provider, sessionId, fullHistory, worldState, currentBeliefStore
-    - Return: updatedBeliefStore, directives
-  - Tool implementations:
-    - `write_belief_store` - update belief store
-    - `enqueue_directive` - push to directive queue
-    - `read_world_state` - fetch current world state
-    - `compact_history` - summarize old conversation
-    - `avatar_command` - planned avatar behavior
-  - Create scheduler:
-    - Periodic invocation (default 60s interval, configurable)
-    - On-demand triggers from Talker
-  - Add telemetry emission
+- [x] Create `packages/thinker/package.json`
+- [x] Create `src/index.ts`:
+  - Strategic reasoning system prompt
+  - `runThinkerTurn()` function
+  - Tool call implementations
+  - Periodic scheduler with configurable interval
 
-### 2.5 Create tts-client package (optional - may keep in web app)
-- [ ] Create `packages/tts-client/package.json`
-- [ ] Move/refactor TTS provider logic
-- [ ] Keep simple for now
+### 2.5 Create tts-client package
+- [x] Create `packages/tts-client/package.json`
+- [x] Implement `DeepgramTTSProvider` using Deepgram Aura WebSocket streaming API
+- [x] Export `synthesizeSpeech` helper
 
 ---
 
-## Phase 3: Orchestration Server
+## Phase 3: Orchestration Server ✅
 
 ### 3.1 Create apps/server
-- [ ] Create `apps/server/package.json`
-- [ ] Add dependencies: express, ws, all packages
-- [ ] Create `src/index.ts`:
-  - Express server setup
-  - Initialize Valkey connection
-  - Initialize chat providers (OpenRouter, Cerebras)
-  - Create orchestrator instance
-- [ ] Create `src/orchestrator.ts`:
-  - Manage session lifecycle
-  - Handle periodic Thinker scheduling
-  - Route events between Talker and Thinker
-  - Maintain conversation history
-- [ ] Create API endpoints:
-  - `POST /session/start` - initialize session
-  - `POST /session/stop` - terminate session
-  - `POST /utterance` - process user utterance
-  - `POST /thinker/trigger` - manually trigger Thinker
-  - `GET /session/status` - get current state
-  - `GET /belief-store` - get current beliefs
-  - `GET /directives` - get pending directives
-- [ ] Create WebSocket endpoint for real-time events
-
-### 3.2 Wire up apps/server
-- [ ] Initialize all packages on startup
-- [ ] Verify Valkey connectivity (health check on boot)
-- [ ] Test OpenRouter API key presence
+- [x] Create `apps/server/package.json`
+- [x] Dependencies: express, cors, ws, @deepgram/sdk, all packages
+- [x] Create `src/index.ts`:
+  - Express + HTTP server setup
+  - Valkey health check on startup
+  - OpenRouter + optional Cerebras provider initialisation
+  - Deepgram TTS provider initialisation
+  - Deepgram STT client initialisation
+- [x] Create `src/orchestrator.ts`:
+  - Session lifecycle management
+  - Periodic Thinker scheduling
+  - Talker–Thinker event routing
+  - Conversation history management
+- [x] REST API endpoints:
+  - `GET /health`
+  - `POST /session/start`
+  - `POST /session/stop`
+  - `GET /session/status`
+  - `POST /utterance`
+  - `POST /utterance/audio` — Deepgram STT
+  - `POST /thinker/trigger`
+  - `POST /world-state`
+  - `GET /belief-store`
+  - `GET /directives`
+- [x] WebSocket endpoint at `/events?sessionId=<id>`
 
 ---
 
 ## Phase 4: Control Panel GUI (apps/web)
 
-### 4.1 Refactor apps/web from minimal-demo
-- [ ] Update package.json workspace references
-- [ ] Keep existing functionality:
-  - STT integration (Deepgram)
-  - TTS playback
-  - WebSocket connection for events
-  - Message history display
-- [ ] Refactor to use packages instead of local code:
-  - Import Talker from `@ariadne/talker`
-  - Import belief store client from `@ariadne/shared-belief-store`
+### 4.1 Base setup ✅
+- [x] Next.js 16 app refactored from minimal-demo
+- [x] Deepgram STT integration (browser-side, via `NEXT_PUBLIC_DEEPGRAM_API_KEY`)
+- [x] TTS audio playback over WebSocket (`tts.audio.chunk` events)
+- [x] WebSocket connection for real-time events
+- [x] Message history display
 
-### 4.2 Add control panel features
-- [ ] Session status indicators:
-  - Talker status (idle/active/waiting)
-  - Thinker status (idle/running/scheduled)
-  - Last Thinker run timestamp
-- [ ] Belief store visualization:
-  - Current participants
-  - Discussion phase/topic
-  - Facilitation plan
-- [ ] Directive queue display:
-  - List pending directives
-  - Show fulfilled directives
-- [ ] Control buttons:
-  - Start/Stop session
-  - Manual "Trigger Thinker"
-  - Intervention mode selector (control/light/heavy)
-  - Periodic Thinker interval slider (30s/60s/120s)
-- [ ] System events log (enhance existing)
+### 4.2 Control panel features
+- [ ] Session status indicators (talker/thinker status, last Thinker run timestamp)
+- [ ] Belief store visualisation (participants, discussion phase, facilitation plan)
+- [ ] Directive queue display (pending / fulfilled)
+- [ ] Control buttons: Start/Stop, manual Thinker trigger, intervention mode selector, Thinker interval slider
+- [ ] Enhanced system events log
 
 ---
 
-## Phase 5: Environment & Testing
+## Phase 5: Environment & Testing ✅
 
 ### 5.1 Environment configuration
-- [ ] Update `.env.example` with:
-  ```
-  OPENROUTER_API_KEY=your_openrouter_api_key
-  VALKEY_URL=valkey://localhost:6379
-  CEREBRAS_API_KEY=your_cerebras_api_key
-  INWORLD_API_KEY=your_inworld_api_key
-  DEEPGRAM_API_KEY=your_deepgram_api_key
-  ```
-- [ ] Create `.env` with placeholder values for development
+- [x] `.env.example` with all required variables
 
-### 5.2 Testing
-- [ ] Verify Valkey connection: `valkey-cli ping`
-- [ ] Test OpenRouter API call
-- [ ] Test Talker turn execution
-- [ ] Test Thinker turn execution
-- [ ] Test belief store read/write
-- [ ] Test periodic Thinker scheduling
-- [ ] Test Talker-Thinker communication via belief store
+### 5.2 Integration testing
+- [x] Valkey connection verified
+- [x] OpenRouter API call tested
+- [x] Talker turn execution tested
+- [x] Thinker turn execution tested
+- [x] Belief store read/write tested
+- [x] Periodic Thinker scheduling tested
+- [x] Talker–Thinker communication via belief store tested
 
 ---
 
-## File Summary
+## Environment Variables Reference
 
-### New Files to Create
-
-| File | Purpose |
-|------|---------|
-| `package.json` | Root workspace config |
-| `turbo.json` | Turborepo configuration |
-| `tsconfig.json` | Base TypeScript config |
-| `packages/shared-contracts/package.json` | Contracts package |
-| `packages/shared-contracts/src/index.ts` | All type definitions |
-| `packages/chat-providers/package.json` | Chat providers package |
-| `packages/chat-providers/src/index.ts` | Provider exports |
-| `packages/chat-providers/src/openrouter.ts` | OpenRouter provider |
-| `packages/shared-belief-store/package.json` | Belief store package |
-| `packages/shared-belief-store/src/index.ts` | Valkey belief store |
-| `packages/event-bus/package.json` | Event bus package |
-| `packages/event-bus/src/index.ts` | Event routing |
-| `packages/talker/package.json` | Talker package |
-| `packages/talker/src/index.ts` | Talker implementation |
-| `packages/thinker/package.json` | Thinker package |
-| `packages/thinker/src/index.ts` | Thinker implementation |
-| `apps/server/package.json` | Server app |
-| `apps/server/src/index.ts` | Express server |
-| `apps/server/src/orchestrator.ts` | Session orchestrator |
-| `apps/server/src/routes/*.ts` | API routes |
-
-### Files to Refactor/Move
-
-| From | To |
-|------|-----|
-| `packages/minimal-demo/` | `apps/web/` |
-| `packages/minimal-demo/src/server/contracts/ai.ts` | `packages/shared-contracts/src/` |
-| `packages/minimal-demo/src/server/providers/chat/cerebras.ts` | `packages/chat-providers/src/` |
-| `packages/minimal-demo/src/server/usecases/talker.ts` | `packages/talker/src/` |
-
-### Files to Delete
-
-| File | Reason |
-|------|--------|
-| `packages/minimal-demo/` | Moved to apps/web |
+| Variable | Required | Description |
+|---|---|---|
+| `OPENROUTER_API_KEY` | **Yes** (server) | OpenRouter API key. Powers the Talker (and Thinker if Cerebras is not configured). |
+| `OPENROUTER_MODEL` | No | Override the default OpenRouter model (e.g. `google/gemini-2.0-flash-001`). |
+| `OPENROUTER_BASE_URL` | No | Override the OpenRouter base URL (default: `https://openrouter.ai/api/v1`). |
+| `CEREBRAS_API_KEY` | No | Cerebras API key. When set, the Thinker uses Cerebras instead of OpenRouter. |
+| `DEEPGRAM_API_KEY` | **Yes** (server) | Powers both STT (`/utterance/audio`) and TTS synthesis over WebSocket. |
+| `VALKEY_URL` | No | Valkey connection URL (default: `valkey://localhost:6379`). |
+| `NEXT_PUBLIC_SERVER_URL` | No | Server base URL for the web control panel (default: `http://localhost:8081`). |
+| `PORT` | No | HTTP port for the server (default: `8081`). |
 
 ---
 
 ## Dependencies
 
 ### Runtime
-- `iovalkey` - Valkey client (shared-belief-store)
-- `openai` - OpenRouter uses OpenAI-compatible API (chat-providers)
-- `express` - HTTP server (apps/server)
-- `ws` - WebSocket server (apps/server)
+- `iovalkey` — Valkey client (`shared-belief-store`)
+- `openai` — OpenRouter & Cerebras use OpenAI-compatible API (`chat-providers`)
+- `@deepgram/sdk` — STT transcription (`apps/server`) and TTS streaming (`tts-client`)
+- `ws` — WebSocket server (`apps/server`) and WebSocket client in Node.js (`tts-client`)
+- `express`, `cors` — HTTP server (`apps/server`)
+- `zod` — Runtime schema validation (`shared-contracts`)
 
 ### Development
-- `turbo` - Build orchestration
-- `typescript` - Already in use
-- `vitest` - Already in use
+- `turbo` — Monorepo build orchestration
+- `typescript` — Type checking
+- `vitest` — Unit testing
+- `tsx` — TypeScript execution for dev and prod server scripts
 
 ---
 
 ## Notes
 
-- All packages should use TypeScript
-- Use `@ariadne/` prefix for internal packages
-- Follow existing code style conventions
-- Keep tool definitions in shared-contracts for version consistency
-- Belief store schema may evolve - version it
-- Thinker interval should be configurable per session
+- All packages use TypeScript with `@ariadne/` internal package prefix.
+- The architecture document refers to System 2 as "Reasoner"; the codebase uses "Thinker" throughout.
+- The belief store schema is versioned in `shared-contracts` — coordinate updates across Talker and Thinker prompts.
+- The Thinker's periodic interval is configurable per session via `thinkerIntervalSec` in `SessionConfig`.

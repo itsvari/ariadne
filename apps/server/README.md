@@ -1,6 +1,6 @@
 # Ariadne Server
 
-The central orchestration server for the Ariadne system. It manages collaborative sessions, routes user utterances through the Talker (conversational AI) and Thinker (reasoning AI) pipelines, provides speech-to-text via Deepgram, text-to-speech via Inworld, and streams real-time events to connected clients over WebSocket.
+The central orchestration server for the Ariadne system. It manages collaborative sessions, routes user utterances through the Talker (conversational AI) and Thinker (reasoning AI) pipelines, provides speech-to-text and text-to-speech via Deepgram, and streams real-time events to connected clients over WebSocket.
 
 ## Prerequisites
 
@@ -22,10 +22,8 @@ Create a `.env` file inside `apps/server/`. The dev and start scripts load it au
 |---|---|---|
 | `OPENROUTER_API_KEY` | **Yes** | API key for OpenRouter. Powers the Talker (and Thinker if Cerebras is not set). The server will refuse to start without this. |
 | `CEREBRAS_API_KEY` | No | API key for Cerebras. When set, the Thinker uses Cerebras instead of OpenRouter. |
-| `DEEPGRAM_API_KEY` | **Yes** | API key for Deepgram. Powers the `/utterance/audio` speech-to-text endpoint. |
-| `INWORLD_API_KEY` | No | API key for Inworld. Powers text-to-speech synthesis streamed over WebSocket. |
+| `DEEPGRAM_API_KEY` | **Yes** | API key for Deepgram. Powers speech-to-text (`/utterance/audio`) and text-to-speech streaming over WebSocket. |
 | `OPENROUTER_MODEL` | No | Override the default OpenRouter model (e.g. `google/gemini-2.0-flash-001`). |
-| `CEREBRAS_THINKER_MODEL` | No | Override the default Cerebras model for the Thinker. |
 | `PORT` | No | HTTP port. Defaults to `8081`. |
 
 Example `.env`:
@@ -34,9 +32,7 @@ Example `.env`:
 OPENROUTER_API_KEY=sk-or-v1-...
 CEREBRAS_API_KEY=csk-...
 DEEPGRAM_API_KEY=af9ae...
-INWORLD_API_KEY=...
 OPENROUTER_MODEL=google/gemini-2.0-flash-001
-CEREBRAS_THINKER_MODEL=gpt-oss-120b
 ```
 
 ## Running the Server
@@ -80,10 +76,9 @@ On startup the server will:
 │  │ (OpenRouter│  │ (Cerebras │  │  (Valkey/Redis) │  │
 │  │  / Gemini) │  │  or OR)   │  │                 │  │
 │  └───────────┘  └───────────┘  └─────────────────┘  │
-│  ┌───────────┐  ┌───────────┐                        │
-│  │  Deepgram  │  │  Inworld  │                        │
-│  │  (STT)     │  │  (TTS)    │                        │
-│  └───────────┘  └───────────┘                        │
+│  ┌──────────────────────────────┐                    │
+│  │  Deepgram (STT + TTS)         │                    │
+│  └──────────────────────────────┘                    │
 ├─────────────────────────────────────────────────────┤
 │              WebSocket (/events)                      │
 │  Real-time event stream to connected clients          │
@@ -108,7 +103,7 @@ Returns the server's health status and which providers are configured.
   "valkey": true,
   "openrouterConfigured": true,
   "cerebrasConfigured": true,
-  "inworldConfigured": true
+  "deepgramTTSConfigured": true
 }
 ```
 
@@ -342,6 +337,6 @@ All messages are JSON with this shape:
 |---|---|
 | `OPENROUTER_API_KEY is required` | Make sure `.env` exists in `apps/server/` with a valid key |
 | `Valkey health check failed` | Start Valkey/Redis on port 6379 — e.g. `docker run -p 6379:6379 valkey/valkey:latest` |
-| `DEEPGRAM_API_KEY is required` | Add `DEEPGRAM_API_KEY` to `.env` with a valid key |
+| `DEEPGRAM_API_KEY is not configured` | Add `DEEPGRAM_API_KEY` to `.env` — required for both STT and TTS |
 | WebSocket won't connect | Connect to path `/events?sessionId=<id>` — other paths are rejected |
 | `Session <id> not found` | Call `/session/start` first to create a session before sending utterances |
