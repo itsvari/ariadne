@@ -82,3 +82,19 @@ npm test
 | [`project_ariadne_architecture.md`](./project_ariadne_architecture.md) | Full system architecture and design decisions |
 | [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) | Phase-by-phase build plan with completion status |
 | [`apps/server/README.md`](./apps/server/README.md) | Server REST API & WebSocket reference |
+
+## Unity Integration Notes
+
+- The current Unity multiplayer template is distributed-authority (not dedicated server-authoritative).
+- Ariadne still runs as a central orchestration service; Quest clients connect to the same Ariadne session over WebSocket.
+- In distributed-authority mode, appoint exactly one client (typically the current session owner) to publish world-state snapshots to avoid duplicate/conflicting updates.
+- Microphone audio can be streamed over WebSocket using `client.audio.chunk` and `client.audio.commit`; the server emits `stt.transcript` after transcription and then routes the text through the normal utterance pipeline.
+- Clients can pass startup policy in `client.hello.payload.sessionConfig` (for example intervention mode and thinker interval).
+- Session teardown can be done explicitly with `POST /session/stop`.
+
+## Protocol Highlights (Latest)
+
+- `client.hello` accepts optional partial session config (`interventionMode`, `groupSize`, `taskId`, `phase`, `thinkerIntervalSec`).
+- `avatar.command` supports command priority (`reactive` or `planned`) and includes expression commands.
+- Streaming STT over WebSocket now includes a dedicated broadcast event: `stt.transcript`.
+- Session status and recent event history are available via `GET /session/status?sessionId=<id>`.

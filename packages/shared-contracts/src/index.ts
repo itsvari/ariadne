@@ -288,6 +288,82 @@ export const WsMessageSchema = z.object({
 });
 export type WsMessage = z.infer<typeof WsMessageSchema>;
 
+export const ClientHelloPayloadSchema = z.object({
+  clientId: z.string().min(1),
+  participantId: z.string().min(1).optional(),
+  autoStartSession: z.boolean().default(true),
+  sessionConfig: SessionConfigSchema.partial().optional(),
+});
+export type ClientHelloPayload = z.infer<typeof ClientHelloPayloadSchema>;
+
+export const ClientUtteranceFinalPayloadSchema = z.object({
+  text: z.string().min(1),
+  speakerId: z.string().optional(),
+});
+export type ClientUtteranceFinalPayload = z.infer<typeof ClientUtteranceFinalPayloadSchema>;
+
+export const ClientWorldStatePayloadSchema = z.object({
+  state: WorldStateSchema,
+});
+export type ClientWorldStatePayload = z.infer<typeof ClientWorldStatePayloadSchema>;
+
+export const ClientThinkerTriggerPayloadSchema = z.object({
+  reason: z.string().optional(),
+});
+export type ClientThinkerTriggerPayload = z.infer<typeof ClientThinkerTriggerPayloadSchema>;
+
+export const ClientPingPayloadSchema = z.object({
+  sentAt: z.string().optional(),
+});
+export type ClientPingPayload = z.infer<typeof ClientPingPayloadSchema>;
+
+export const ClientAudioChunkPayloadSchema = z.object({
+  audioBase64: z.string().min(1),
+  sampleRateHz: z.number().int().min(8000).max(48000).default(16000),
+  channels: z.number().int().min(1).max(2).default(1),
+  sequence: z.number().int().min(0).optional(),
+  speakerId: z.string().optional(),
+});
+export type ClientAudioChunkPayload = z.infer<typeof ClientAudioChunkPayloadSchema>;
+
+export const ClientAudioCommitPayloadSchema = z.object({
+  speakerId: z.string().optional(),
+  reason: z.string().optional(),
+});
+export type ClientAudioCommitPayload = z.infer<typeof ClientAudioCommitPayloadSchema>;
+
+export const ClientWsMessageSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('client.hello'),
+    payload: ClientHelloPayloadSchema,
+  }),
+  z.object({
+    type: z.literal('client.utterance.final'),
+    payload: ClientUtteranceFinalPayloadSchema,
+  }),
+  z.object({
+    type: z.literal('client.world_state'),
+    payload: ClientWorldStatePayloadSchema,
+  }),
+  z.object({
+    type: z.literal('client.thinker.trigger'),
+    payload: ClientThinkerTriggerPayloadSchema,
+  }),
+  z.object({
+    type: z.literal('client.ping'),
+    payload: ClientPingPayloadSchema.optional(),
+  }),
+  z.object({
+    type: z.literal('client.audio.chunk'),
+    payload: ClientAudioChunkPayloadSchema,
+  }),
+  z.object({
+    type: z.literal('client.audio.commit'),
+    payload: ClientAudioCommitPayloadSchema.optional(),
+  }),
+]);
+export type ClientWsMessage = z.infer<typeof ClientWsMessageSchema>;
+
 export const TelemetryEventSchema = z.object({
   type: z.string(),
   sessionId: z.string(),

@@ -40,6 +40,12 @@ async function bootstrap(): Promise<void> {
     talkerProvider,
     thinkerProvider,
     ttsProvider,
+    transcribeAudio: async ({ audioBuffer }) => {
+      if (!deepgram) {
+        return null;
+      }
+      return transcribeAudioBuffer(deepgram, audioBuffer);
+    },
   });
 
   app.get('/health', async (_req, res) => {
@@ -106,14 +112,7 @@ async function bootstrap(): Promise<void> {
       }
 
       const audioBuffer = Buffer.from(audioBase64, 'base64');
-      const result = await deepgram.listen.v1.media.transcribeFile(audioBuffer, {
-        model: 'nova-3',
-        encoding: 'linear16',
-      });
-
-      const transcript = 'results' in result
-        ? result.results?.channels[0]?.alternatives?.[0]?.transcript?.trim()
-        : undefined;
+      const transcript = await transcribeAudioBuffer(deepgram, audioBuffer);
       if (!transcript) {
         res.json({ ok: true, transcript: '' });
         return;
@@ -185,6 +184,21 @@ async function bootstrap(): Promise<void> {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown server error';
+}
+
+async function transcribeAudioBuffer(
+  deepgram: DeepgramClient,
+  audioBuffer: Buffer,
+): Promise<string | null> {
+  const result = await deepgram.listen.v1.media.transcribeFile(audioBuffer, {
+    model: 'nova-3',
+    encoding: 'linear16',
+  });
+
+  const transcript = 'results' in result
+    ? result.results?.channels[0]?.alternatives?.[0]?.transcript?.trim()
+    : undefined;
+  return transcript || null;
 }
 
 void bootstrap();

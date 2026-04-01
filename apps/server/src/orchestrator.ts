@@ -7,9 +7,14 @@ import {
 } from '@ariadne/chat-providers';
 import { SharedBeliefStore } from '@ariadne/shared-belief-store';
 import {
+  type ClientAudioChunkPayload,
+  type ClientAudioCommitPayload,
+  ClientWsMessageSchema,
   createEmptyBeliefStore,
   utteranceToChatMessage,
   type ChatProvider,
+  type ClientHelloPayload,
+  type ClientWsMessage,
   type SessionConfig,
   type TalkerRequest,
   type Utterance,
@@ -32,6 +37,20 @@ export interface SessionStatus {
   lastActivityAt: string;
 }
 
+interface SocketClientMetadata {
+  clientId: string;
+  participantId?: string;
+  joinedAt: string;
+}
+
+interface SocketAudioBufferState {
+  chunks: Buffer[];
+  sampleRateHz: number;
+  channels: number;
+  bytesBuffered: number;
+  speakerId?: string;
+}
+
 interface SessionState extends SessionStatus {
   config: SessionConfig;
   sockets: Set<WebSocket>;
@@ -46,16 +65,26 @@ export interface AriadneOrchestratorOptions {
   talkerProvider?: ChatProvider;
   thinkerProvider?: ChatProvider;
   ttsProvider?: DeepgramTTSProvider;
+  transcribeAudio?: (input: {
+    audioBuffer: Buffer;
+    sampleRateHz: number;
+    channels: number;
+  }) => Promise<string | null>;
 }
 
 export class AriadneOrchestrator {
   private sessions = new Map<string, SessionState>();
+  private socketClientMetadata = new WeakMap<WebSocket, SocketClientMetadata>();
+  private socketAudioBuffers = new WeakMap<WebSocket, SocketAudioBufferState>();
   private bus = new EventBus();
   private wsServer: WebSocketServer;
   private beliefStore: SharedBeliefStore;
   private talkerProvider: ChatProvider;
   private thinkerProvider: ChatProvider;
   private ttsProvider: DeepgramTTSProvider;
+  private transcribeAudio?: AriadneOrchestratorOptions['transcribeAudio'];
+
+  private static readonly MAX_BUFFERED_AUDIO_BYTES = 2_000_000;
 
   constructor(options: AriadneOrchestratorOptions) {
     this.beliefStore = options.beliefStore;
@@ -66,6 +95,7 @@ export class AriadneOrchestrator {
         ? new CerebrasChatProvider()
         : this.talkerProvider);
     this.ttsProvider = options.ttsProvider ?? new DeepgramTTSProvider();
+    this.transcribeAudio = options.transcribeAudio;
 
     this.wsServer = new WebSocketServer({ noServer: true });
     options.httpServer.on('upgrade', (request, socket, head) => {
@@ -154,7 +184,7 @@ export class AriadneOrchestrator {
   }
 
   async handleWorldStateUpdate(sessionId: string, state: WorldState): Promise<void> {
-    const session = this.getRequiredSession(sessionId);
+    const session = await this.ensureSessionReady(sessionId);
     await this.beliefStore.setWorldState(sessionId, state);
     session.lastActivityAt = new Date().toISOString();
     await this.bus.publish({
@@ -171,7 +201,7 @@ export class AriadneOrchestrator {
     text: string;
     speakerId?: string;
   }): Promise<{ ok: true }> {
-    const session = this.getRequiredSession(input.sessionId);
+    const session = await this.ensureSessionReady(input.sessionId);
     const utterance: Utterance = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -200,7 +230,7 @@ export class AriadneOrchestrator {
   }
 
   async triggerThinker(sessionId: string, reason = 'manual'): Promise<{ ok: true }> {
-    const session = this.getRequiredSession(sessionId);
+    const session = await this.ensureSessionReady(sessionId);
     if (session.thinkerRunInFlight) {
       await session.thinkerRunInFlight;
       return { ok: true };
@@ -430,9 +460,266 @@ export class AriadneOrchestrator {
       payload: this.serializeSession(session),
     });
 
+    socket.on('message', (rawData) => {
+      void this.handleSocketMessage(socket, sessionId, rawData);
+    });
+
     socket.on('close', () => {
       session.sockets.delete(socket);
+      this.socketAudioBuffers.delete(socket);
+
+      const metadata = this.socketClientMetadata.get(socket);
+      this.socketClientMetadata.delete(socket);
+      if (!metadata) {
+        return;
+      }
+
+      this.broadcast(sessionId, 'client.left', {
+        clientId: metadata.clientId,
+        participantId: metadata.participantId,
+        connectedClients: this.getIdentifiedClientCount(session),
+      });
     });
+  }
+
+  private async handleSocketMessage(socket: WebSocket, sessionId: string, rawData: unknown): Promise<void> {
+    const rawText = this.decodeSocketMessage(rawData);
+    if (!rawText) {
+      return;
+    }
+
+    let message: ClientWsMessage;
+    try {
+      message = ClientWsMessageSchema.parse(JSON.parse(rawText));
+    } catch {
+      this.sendSocketMessage(socket, {
+        type: 'error',
+        sessionId,
+        eventId: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        payload: { message: 'Invalid client message payload.' },
+      });
+      return;
+    }
+
+    if (message.type === 'client.hello') {
+      await this.handleClientHello(socket, sessionId, message.payload);
+      return;
+    }
+
+    if (message.type === 'client.utterance.final') {
+      const metadata = this.socketClientMetadata.get(socket);
+      const fallbackSpeakerId = metadata?.participantId ?? metadata?.clientId;
+      await this.handleUtterance({
+        sessionId,
+        text: message.payload.text,
+        speakerId: message.payload.speakerId ?? fallbackSpeakerId,
+      });
+      return;
+    }
+
+    if (message.type === 'client.world_state') {
+      await this.handleWorldStateUpdate(sessionId, message.payload.state);
+      return;
+    }
+
+    if (message.type === 'client.thinker.trigger') {
+      await this.triggerThinker(sessionId, message.payload.reason ?? 'client_request');
+      return;
+    }
+
+    if (message.type === 'client.ping') {
+      this.sendSocketMessage(socket, {
+        type: 'client.pong',
+        sessionId,
+        eventId: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        payload: {
+          sentAt: message.payload?.sentAt,
+          receivedAt: new Date().toISOString(),
+        },
+      });
+      return;
+    }
+
+    if (message.type === 'client.audio.chunk') {
+      this.bufferAudioChunk(socket, message.payload);
+      return;
+    }
+
+    if (message.type === 'client.audio.commit') {
+      await this.flushBufferedAudioToUtterance(socket, sessionId, message.payload ?? {});
+    }
+  }
+
+  private bufferAudioChunk(socket: WebSocket, payload: ClientAudioChunkPayload): void {
+    let audioState = this.socketAudioBuffers.get(socket);
+    if (!audioState) {
+      audioState = {
+        chunks: [],
+        sampleRateHz: payload.sampleRateHz,
+        channels: payload.channels,
+        bytesBuffered: 0,
+        speakerId: payload.speakerId,
+      };
+      this.socketAudioBuffers.set(socket, audioState);
+    }
+
+    audioState.sampleRateHz = payload.sampleRateHz;
+    audioState.channels = payload.channels;
+    audioState.speakerId = payload.speakerId ?? audioState.speakerId;
+
+    const chunkBuffer = Buffer.from(payload.audioBase64, 'base64');
+    if (chunkBuffer.length === 0) {
+      return;
+    }
+
+    audioState.chunks.push(chunkBuffer);
+    audioState.bytesBuffered += chunkBuffer.length;
+
+    if (audioState.bytesBuffered > AriadneOrchestrator.MAX_BUFFERED_AUDIO_BYTES) {
+      const removedChunk = audioState.chunks.shift();
+      audioState.bytesBuffered = Math.max(0, audioState.bytesBuffered - (removedChunk?.length ?? 0));
+    }
+  }
+
+  private async flushBufferedAudioToUtterance(
+    socket: WebSocket,
+    sessionId: string,
+    payload: ClientAudioCommitPayload,
+  ): Promise<void> {
+    const audioState = this.socketAudioBuffers.get(socket);
+    if (!audioState || audioState.bytesBuffered === 0) {
+      return;
+    }
+
+    this.socketAudioBuffers.delete(socket);
+    if (!this.transcribeAudio) {
+      this.sendSocketMessage(socket, {
+        type: 'error',
+        sessionId,
+        eventId: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        payload: { message: 'Streaming audio received, but no transcription provider is configured.' },
+      });
+      return;
+    }
+
+    const audioBuffer = Buffer.concat(audioState.chunks);
+    const transcript = (await this.transcribeAudio({
+      audioBuffer,
+      sampleRateHz: audioState.sampleRateHz,
+      channels: audioState.channels,
+    }))?.trim();
+
+    if (!transcript) {
+      return;
+    }
+
+    const speakerId = this.resolveSpeakerIdForSocket(socket, payload.speakerId ?? audioState.speakerId);
+    this.broadcast(sessionId, 'stt.transcript', {
+      speakerId,
+      text: transcript,
+      reason: payload.reason ?? 'client.audio.commit',
+    });
+
+    await this.handleUtterance({
+      sessionId,
+      text: transcript,
+      speakerId,
+    });
+  }
+
+  private resolveSpeakerIdForSocket(socket: WebSocket, overrideSpeakerId?: string): string | undefined {
+    if (overrideSpeakerId) {
+      return overrideSpeakerId;
+    }
+
+    const metadata = this.socketClientMetadata.get(socket);
+    return metadata?.participantId ?? metadata?.clientId;
+  }
+
+  private async handleClientHello(
+    socket: WebSocket,
+    sessionId: string,
+    payload: ClientHelloPayload,
+  ): Promise<void> {
+    const metadata: SocketClientMetadata = {
+      clientId: payload.clientId,
+      participantId: payload.participantId,
+      joinedAt: new Date().toISOString(),
+    };
+    this.socketClientMetadata.set(socket, metadata);
+
+    if (payload.autoStartSession !== false) {
+      await this.ensureSessionReady(sessionId, payload.sessionConfig ?? {});
+    }
+
+    const session = this.getRequiredSession(sessionId);
+    this.sendSocketMessage(socket, {
+      type: 'client.hello.ack',
+      sessionId,
+      eventId: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      payload: {
+        clientId: payload.clientId,
+        participantId: payload.participantId,
+        sessionStatus: this.serializeSession(session),
+      },
+    });
+
+    this.broadcast(sessionId, 'client.joined', {
+      clientId: payload.clientId,
+      participantId: payload.participantId,
+      connectedClients: this.getIdentifiedClientCount(session),
+    });
+  }
+
+  private decodeSocketMessage(rawData: unknown): string {
+    if (typeof rawData === 'string') {
+      return rawData;
+    }
+
+    if (Buffer.isBuffer(rawData)) {
+      return rawData.toString('utf8');
+    }
+
+    if (Array.isArray(rawData)) {
+      return Buffer.concat(rawData).toString('utf8');
+    }
+
+    if (rawData instanceof ArrayBuffer) {
+      return Buffer.from(rawData).toString('utf8');
+    }
+
+    return '';
+  }
+
+  private getIdentifiedClientCount(session: SessionState): number {
+    let identifiedClientCount = 0;
+    for (const socket of session.sockets) {
+      if (this.socketClientMetadata.has(socket)) {
+        identifiedClientCount += 1;
+      }
+    }
+    return identifiedClientCount;
+  }
+
+  private async ensureSessionReady(sessionId: string, config: Partial<SessionConfig> = {}): Promise<SessionState> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      await this.startSession(sessionId, config);
+      return this.getRequiredSession(sessionId);
+    }
+
+    if (!session.active) {
+      await this.startSession(sessionId, {
+        ...session.config,
+        ...config,
+      });
+    }
+
+    return this.getRequiredSession(sessionId);
   }
 
   private broadcast(sessionId: string, type: string, payload: unknown): void {

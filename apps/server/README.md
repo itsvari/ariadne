@@ -303,6 +303,13 @@ Connect to `ws://localhost:8081/events?sessionId=<id>` to receive real-time even
 
 On connection, the server immediately sends a `session.status` event with the current state.
 
+The socket is bidirectional:
+
+- Server to client: session updates, TTS audio chunks, avatar commands, STT transcripts, telemetry
+- Client to server: participant registration (`client.hello`), utterances, world-state updates, thinker triggers, ping, and streamed audio chunks/commit
+
+For distributed-authority Unity sessions, send world-state updates from exactly one appointed authority client (typically the current session owner) to avoid duplicate/conflicting state snapshots.
+
 All messages are JSON with this shape:
 
 ```json
@@ -320,7 +327,7 @@ All messages are JSON with this shape:
 | Type | Payload | Description |
 |---|---|---|
 | `session.status` | `SessionStatus` | Session state changed (start, stop, talker/thinker status updates) |
-| `utterance.final` | `{ utteranceId, speakerId?, text }` | A user utterance was finalized |
+| `utterance.final` | `{ id, role, speakerId?, text, timestamp }` | A user utterance was finalized |
 | `speak` | `{ text }` | The Talker is speaking (text content) |
 | `tts.audio.chunk` | `{ seq, audioBase64 }` | A chunk of TTS audio (base64-encoded) |
 | `tts.audio.done` | `{ totalChunks }` | TTS audio stream completed |
@@ -328,8 +335,153 @@ All messages are JSON with this shape:
 | `reasoner.complete` | `{ reason, directiveCount, updatedBeliefStore }` | Thinker finished a reasoning cycle |
 | `world_state.update` | World state object | World state was updated |
 | `avatar.command` | `{ ..., priority }` | Avatar animation/behavior command (`priority`: `"reactive"` or `"planned"`) |
+| `stt.transcript` | `{ speakerId?, text, reason }` | Transcript generated from streamed `client.audio.*` chunks |
 | `telemetry` | Telemetry event | Internal telemetry from Talker or Thinker |
+| `client.hello.ack` | `{ clientId, participantId?, sessionStatus }` | Direct acknowledgement to registering socket |
+| `client.pong` | `{ sentAt?, receivedAt }` | Response to `client.ping` |
+| `client.joined` | `{ clientId, participantId?, connectedClients }` | A client completed `client.hello` registration |
+| `client.left` | `{ clientId, participantId?, connectedClients }` | A registered client disconnected |
 | `error` | `{ message }` | An error occurred during processing |
+
+### Client Messages
+
+Quest clients can send JSON messages over the same WebSocket. The server validates each message and replies with `error` for invalid payloads.
+
+#### `client.hello`
+
+Registers a headset client for the session. If `autoStartSession` is omitted or `true`, the session is started automatically when this message arrives.
+
+```json
+{
+  "type": "client.hello",
+  "payload": {
+    "clientId": "quest-a",
+    "participantId": "player-1",
+    "autoStartSession": true,
+    "sessionConfig": {
+      "interventionMode": "control",
+      "groupSize": 3,
+      "taskId": "room-2",
+      "phase": "discussion",
+      "thinkerIntervalSec": 60
+    }
+  }
+}
+```
+
+`sessionConfig` is optional and partial; omitted fields use server defaults.
+
+Server responses/events:
+
+- Direct ack to that socket: `client.hello.ack`
+- Broadcast to session: `client.joined`
+
+#### `client.utterance.final`
+
+Submits a final transcript turn from a headset participant.
+
+```json
+{
+  "type": "client.utterance.final",
+  "payload": {
+    "text": "Can we split up and search both rooms?",
+    "speakerId": "player-1"
+  }
+}
+```
+
+This follows the same processing path as `POST /utterance`.
+
+#### `client.world_state`
+
+Pushes a world-state snapshot from a Quest client.
+
+Recommended pattern for distributed authority: only the currently appointed authority client should send this message.
+
+```json
+{
+  "type": "client.world_state",
+  "payload": {
+    "state": {
+      "players": [
+        {
+          "id": "player-1",
+          "location": "room-a",
+          "activity": "speaking",
+          "proximity": 0.4
+        }
+      ],
+      "location": "room-a",
+      "activities": ["discussion"]
+    }
+  }
+}
+```
+
+#### `client.thinker.trigger`
+
+Manually trigger the Thinker from a client.
+
+```json
+{
+  "type": "client.thinker.trigger",
+  "payload": {
+    "reason": "player_requested_summary"
+  }
+}
+```
+
+#### `client.ping`
+
+Optional heartbeat. Server replies with `client.pong`.
+
+```json
+{
+  "type": "client.ping",
+  "payload": {
+    "sentAt": "2026-04-01T12:00:00.000Z"
+  }
+}
+```
+
+#### `client.audio.chunk`
+
+Streams microphone PCM chunks over the existing WebSocket connection.
+
+```json
+{
+  "type": "client.audio.chunk",
+  "payload": {
+    "audioBase64": "<base64 linear16 pcm>",
+    "sampleRateHz": 16000,
+    "channels": 1,
+    "sequence": 0,
+    "speakerId": "player-1"
+  }
+}
+```
+
+#### `client.audio.commit`
+
+Marks the end of one streamed utterance segment (for example after VAD silence). On commit, the server transcribes buffered chunks and routes transcript text through the same pipeline as `client.utterance.final` and `POST /utterance`.
+
+```json
+{
+  "type": "client.audio.commit",
+  "payload": {
+    "speakerId": "player-1",
+    "reason": "vad_silence"
+  }
+}
+```
+
+### Streaming STT Flow
+
+1. Client sends one or more `client.audio.chunk` messages.
+2. Client sends `client.audio.commit`.
+3. Server transcribes buffered audio (if Deepgram is configured).
+4. Server broadcasts `stt.transcript`.
+5. Server feeds transcript into the normal utterance flow, resulting in `utterance.final`, Talker output, and optional TTS/avatar events.
 
 ## Troubleshooting
 
@@ -338,5 +490,6 @@ All messages are JSON with this shape:
 | `OPENROUTER_API_KEY is required` | Make sure `.env` exists in `apps/server/` with a valid key |
 | `Valkey health check failed` | Start Valkey/Redis on port 6379 — e.g. `docker run -p 6379:6379 valkey/valkey:latest` |
 | `DEEPGRAM_API_KEY is not configured` | Add `DEEPGRAM_API_KEY` to `.env` — required for both STT and TTS |
+| `Streaming audio received, but no transcription provider is configured.` | Configure `DEEPGRAM_API_KEY` so `client.audio.commit` can produce transcripts |
 | WebSocket won't connect | Connect to path `/events?sessionId=<id>` — other paths are rejected |
-| `Session <id> not found` | Call `/session/start` first to create a session before sending utterances |
+| `Session <id> not found` | For REST-only workflows, call `/session/start` before querying status; WebSocket clients can auto-start via `client.hello` |
