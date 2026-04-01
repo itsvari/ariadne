@@ -91,6 +91,7 @@ npm test
 - Microphone audio can be streamed over WebSocket using `client.audio.chunk` and `client.audio.commit`; the server emits `stt.transcript` after transcription and then routes the text through the normal utterance pipeline.
 - Clients can pass startup policy in `client.hello.payload.sessionConfig` (for example intervention mode and thinker interval).
 - Session teardown can be done explicitly with `POST /session/stop`.
+- LAN auto-discovery is available for ad-hoc local hosting via UDP discovery (`ariadne.discover.request` / `ariadne.discover.response`).
 
 ## Protocol Highlights (Latest)
 

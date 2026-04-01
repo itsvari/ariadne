@@ -25,6 +25,8 @@ Create a `.env` file inside `apps/server/`. The dev and start scripts load it au
 | `DEEPGRAM_API_KEY` | **Yes** | API key for Deepgram. Powers speech-to-text (`/utterance/audio`) and text-to-speech streaming over WebSocket. |
 | `OPENROUTER_MODEL` | No | Override the default OpenRouter model (e.g. `google/gemini-2.0-flash-001`). |
 | `PORT` | No | HTTP port. Defaults to `8081`. |
+| `DISCOVERY_ENABLED` | No | Enable UDP LAN discovery responder. Defaults to `true`. |
+| `DISCOVERY_PORT` | No | UDP port for LAN discovery request/response. Defaults to `9876`. |
 
 Example `.env`:
 
@@ -33,6 +35,8 @@ OPENROUTER_API_KEY=sk-or-v1-...
 CEREBRAS_API_KEY=csk-...
 DEEPGRAM_API_KEY=af9ae...
 OPENROUTER_MODEL=google/gemini-2.0-flash-001
+DISCOVERY_ENABLED=true
+DISCOVERY_PORT=9876
 ```
 
 ## Running the Server
@@ -61,7 +65,42 @@ On startup the server will:
 1. Verify `OPENROUTER_API_KEY` is present
 2. Health-check the Valkey/Redis connection
 3. Initialize the Talker, Thinker, TTS, and Deepgram providers
-4. Listen on `http://localhost:8081` (or the configured `PORT`)
+4. Start UDP LAN discovery responder (unless disabled)
+5. Listen on `http://localhost:8081` (or the configured `PORT`)
+
+## LAN Discovery (UDP)
+
+To support ad-hoc local hosting across multiple headsets, the server exposes a UDP discovery responder.
+
+- Default port: `9876` (configurable via `DISCOVERY_PORT`)
+- Enable/disable: `DISCOVERY_ENABLED=true|false`
+
+Client broadcast request:
+
+```json
+{
+  "type": "ariadne.discover.request",
+  "protocolVersion": "v1"
+}
+```
+
+Server response:
+
+```json
+{
+  "type": "ariadne.discover.response",
+  "protocolVersion": "v1",
+  "transport": "ws",
+  "wsPort": 8081,
+  "wsPath": "/events",
+  "serverName": "host-machine-name",
+  "timestamp": "2026-04-01T12:00:00.000Z"
+}
+```
+
+Clients can use the response sender IP plus `wsPort`/`wsPath` to construct:
+
+`ws://<discovered-ip>:<wsPort><wsPath>?sessionId=<session-id>`
 
 ## Architecture Overview
 

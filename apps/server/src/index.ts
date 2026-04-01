@@ -1,4 +1,6 @@
 import http from 'http';
+import dgram from 'dgram';
+import os from 'os';
 import cors from 'cors';
 import express from 'express';
 import { DeepgramClient } from '@deepgram/sdk';
@@ -8,6 +10,23 @@ import { DeepgramTTSProvider } from '@ariadne/tts-client';
 import { AriadneOrchestrator } from './orchestrator';
 
 const PORT = Number(process.env.PORT ?? 8081);
+const DISCOVERY_ENABLED = (process.env.DISCOVERY_ENABLED ?? 'true').toLowerCase() !== 'false';
+const DISCOVERY_PORT = Number(process.env.DISCOVERY_PORT ?? 9876);
+
+interface DiscoveryRequest {
+  type?: string;
+  protocolVersion?: string;
+}
+
+interface DiscoveryResponse {
+  type: 'ariadne.discover.response';
+  protocolVersion: 'v1';
+  transport: 'ws';
+  wsPort: number;
+  wsPath: '/events';
+  serverName: string;
+  timestamp: string;
+}
 
 async function bootstrap(): Promise<void> {
   if (!process.env.OPENROUTER_API_KEY) {
@@ -177,13 +196,74 @@ async function bootstrap(): Promise<void> {
     }
   });
 
+  const closeDiscoveryResponder = startDiscoveryResponder(PORT);
+
   server.listen(PORT, () => {
     console.log(`Ariadne server listening on http://localhost:${PORT}`);
   });
+
+  const shutdown = (): void => {
+    closeDiscoveryResponder();
+  };
+
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown server error';
+}
+
+function startDiscoveryResponder(httpPort: number): () => void {
+  if (!DISCOVERY_ENABLED) {
+    return () => undefined;
+  }
+
+  const discoverySocket = dgram.createSocket('udp4');
+  discoverySocket.on('error', (error) => {
+    console.warn(`[discovery] UDP responder error: ${toErrorMessage(error)}`);
+  });
+
+  discoverySocket.on('message', (rawMessage, remoteInfo) => {
+    const request = parseDiscoveryRequest(rawMessage);
+    if (!request || request.type !== 'ariadne.discover.request') {
+      return;
+    }
+
+    const response: DiscoveryResponse = {
+      type: 'ariadne.discover.response',
+      protocolVersion: 'v1',
+      transport: 'ws',
+      wsPort: httpPort,
+      wsPath: '/events',
+      serverName: os.hostname(),
+      timestamp: new Date().toISOString(),
+    };
+
+    const responsePayload = Buffer.from(JSON.stringify(response));
+    discoverySocket.send(responsePayload, remoteInfo.port, remoteInfo.address);
+  });
+
+  discoverySocket.bind(DISCOVERY_PORT, () => {
+    discoverySocket.setBroadcast(true);
+    console.log(`[discovery] UDP responder listening on port ${DISCOVERY_PORT}`);
+  });
+
+  return () => {
+    try {
+      discoverySocket.close();
+    } catch {
+      // Best-effort cleanup on process shutdown.
+    }
+  };
+}
+
+function parseDiscoveryRequest(rawMessage: Buffer): DiscoveryRequest | null {
+  try {
+    return JSON.parse(rawMessage.toString('utf8')) as DiscoveryRequest;
+  } catch {
+    return null;
+  }
 }
 
 async function transcribeAudioBuffer(
