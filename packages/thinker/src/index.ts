@@ -16,7 +16,8 @@ import {
 const THINKER_SYSTEM_PROMPT = `You are Ariadne's strategic thinker.
 Analyze the full conversation, maintain the shared belief store, and queue crisp directives for the talker.
 Always prefer structured tool calls over freeform narration.
-Update the belief store every run, even if the update is small.`;
+Update the belief store every run, even if the update is small.
+Belief store schema requirement: version must always be exactly "v1".`;
 
 export interface ThinkerToolRuntime {
   write_belief_store(args: { store?: BeliefStore }): Promise<BeliefStore>;
@@ -247,6 +248,7 @@ function decodeBeliefStoreArgument(rawStore: unknown, fallback: BeliefStore): Be
   const normalizedCandidate: Record<string, unknown> = {
     ...fallback,
     ...source,
+    version: 'v1',
     participants: normalizedParticipants,
     discussion_state: discussionState,
     facilitation_plan: Array.isArray(source.facilitation_plan)

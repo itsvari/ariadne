@@ -52,12 +52,24 @@ interface SocketAudioBufferState {
   speakerId?: string;
 }
 
+type StreamReader = ReturnType<ReadableStream<Uint8Array>['getReader']>;
+
+interface ActiveSpeechState {
+  id: string;
+  interrupted: boolean;
+  doneEmitted: boolean;
+  reader?: StreamReader;
+}
+
 interface SessionState extends SessionStatus {
   config: SessionConfig;
   sockets: Set<WebSocket>;
   scheduler?: ThinkerSchedulerControls;
   events: WsMessage[];
   thinkerRunInFlight?: Promise<void>;
+  talkerRunInFlight?: Promise<void>;
+  talkerRerunRequested?: boolean;
+  activeSpeech?: ActiveSpeechState;
 }
 
 export interface AriadneOrchestratorOptions {
@@ -171,6 +183,7 @@ export class AriadneOrchestrator {
     session.talkerStatus = 'idle';
     session.thinkerStatus = 'idle';
     session.lastActivityAt = new Date().toISOString();
+    this.interruptActiveSpeech(sessionId, 'session_stopped');
     this.broadcast(sessionId, 'session.status', this.serializeSession(session));
     return this.serializeSession(session);
   }
@@ -207,6 +220,8 @@ export class AriadneOrchestrator {
     speakerId?: string;
   }): Promise<{ ok: true }> {
     const session = await this.ensureSessionReady(input.sessionId);
+    this.interruptActiveSpeech(input.sessionId, 'user_barge_in');
+
     const utterance: Utterance = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -230,7 +245,7 @@ export class AriadneOrchestrator {
     });
 
     this.broadcast(input.sessionId, 'utterance.final', utterance);
-    await this.invokeTalker(input.sessionId);
+    await this.scheduleTalker(input.sessionId);
     return { ok: true };
   }
 
@@ -338,7 +353,7 @@ export class AriadneOrchestrator {
               directiveCount: result.directives.length,
               reason,
             });
-            await this.invokeTalker(sessionId);
+            await this.scheduleTalker(sessionId);
           }
         }
       } catch (error) {
@@ -358,7 +373,28 @@ export class AriadneOrchestrator {
     return { ok: true };
   }
 
-  private async invokeTalker(sessionId: string): Promise<void> {
+  private async scheduleTalker(sessionId: string): Promise<void> {
+    const session = this.getRequiredSession(sessionId);
+
+    if (session.talkerRunInFlight) {
+      session.talkerRerunRequested = true;
+      await session.talkerRunInFlight;
+      return;
+    }
+
+    session.talkerRunInFlight = (async () => {
+      do {
+        session.talkerRerunRequested = false;
+        await this.invokeTalkerTurn(sessionId);
+      } while (session.active && session.talkerRerunRequested);
+    })().finally(() => {
+      session.talkerRunInFlight = undefined;
+    });
+
+    await session.talkerRunInFlight;
+  }
+
+  private async invokeTalkerTurn(sessionId: string): Promise<void> {
     const session = this.getRequiredSession(sessionId);
     session.talkerStatus = 'active';
     this.broadcast(sessionId, 'session.status', this.serializeSession(session));
@@ -476,6 +512,16 @@ export class AriadneOrchestrator {
       return { spoken: false };
     }
 
+    const session = this.getRequiredSession(sessionId);
+    this.interruptActiveSpeech(sessionId, 'superseded_speech');
+
+    const speechState: ActiveSpeechState = {
+      id: crypto.randomUUID(),
+      interrupted: false,
+      doneEmitted: false,
+    };
+    session.activeSpeech = speechState;
+
     const utterance: Utterance = {
       id: crypto.randomUUID(),
       role: 'assistant',
@@ -500,26 +546,64 @@ export class AriadneOrchestrator {
       sampleRate: ttsSampleRateHz,
     });
     const reader = audio.getReader();
+    speechState.reader = reader;
     let sequence = 0;
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
+    try {
+      for (;;) {
+        if (speechState.interrupted) {
+          break;
+        }
 
-      this.broadcast(sessionId, 'tts.audio.chunk', {
-        seq: sequence,
-        encoding: ttsEncoding,
-        sampleRateHz: ttsSampleRateHz,
-        channels: ttsChannels,
-        audioBase64: Buffer.from(value).toString('base64'),
-      });
-      sequence += 1;
+        const { done, value } = await reader.read();
+        if (done || speechState.interrupted) {
+          break;
+        }
+
+        this.broadcast(sessionId, 'tts.audio.chunk', {
+          seq: sequence,
+          encoding: ttsEncoding,
+          sampleRateHz: ttsSampleRateHz,
+          channels: ttsChannels,
+          audioBase64: Buffer.from(value).toString('base64'),
+        });
+        sequence += 1;
+      }
+    } finally {
+      if (session.activeSpeech === speechState) {
+        session.activeSpeech = undefined;
+      }
     }
 
-    this.broadcast(sessionId, 'tts.audio.done', { totalChunks: sequence });
+    if (!speechState.doneEmitted) {
+      speechState.doneEmitted = true;
+      this.broadcast(sessionId, 'tts.audio.done', { totalChunks: sequence, interrupted: speechState.interrupted });
+    }
     return { spoken: true, text: normalized };
+  }
+
+  private interruptActiveSpeech(sessionId: string, reason: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session?.activeSpeech) {
+      return;
+    }
+
+    const speechState = session.activeSpeech;
+    if (speechState.interrupted) {
+      return;
+    }
+
+    speechState.interrupted = true;
+    if (!speechState.doneEmitted) {
+      speechState.doneEmitted = true;
+      this.broadcast(sessionId, 'tts.audio.done', { interrupted: true, reason });
+    }
+
+    if (speechState.reader) {
+      void speechState.reader.cancel(reason).catch(() => {
+        // Best-effort cancellation of active stream reader.
+      });
+    }
   }
 
   private stripMarkdownForSpeech(text: string): string {

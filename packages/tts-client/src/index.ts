@@ -37,6 +37,44 @@ export class DeepgramTTSProvider implements TTSProvider {
       new ReadableStream<Uint8Array>({
         start(controller) {
           let isClosed = false;
+          let hasErrored = false;
+          let socket: WebSocket | null = null;
+
+          const safeEnqueue = (chunk: Uint8Array) => {
+            if (isClosed || hasErrored) {
+              return;
+            }
+            try {
+              controller.enqueue(chunk);
+            } catch {
+              // Controller may already be closed if cancellation raced with socket events.
+              isClosed = true;
+            }
+          };
+
+          const safeError = (error: Error) => {
+            if (isClosed || hasErrored) {
+              return;
+            }
+            hasErrored = true;
+            try {
+              controller.error(error);
+            } catch {
+              // Ignore late error after stream has already terminated.
+            }
+          };
+
+          const teardownSocket = () => {
+            if (!socket) {
+              return;
+            }
+            try {
+              socket.close();
+            } catch {
+              // Best effort.
+            }
+            socket = null;
+          };
 
           const closeStream = () => {
             if (isClosed) {
@@ -48,10 +86,11 @@ export class DeepgramTTSProvider implements TTSProvider {
             } catch {
               // no-op
             }
+            teardownSocket();
           };
 
           const wsUrl = `${DEEPGRAM_WS_URL}?model=${encodeURIComponent(model)}&encoding=${encodeURIComponent(encoding)}&sample_rate=${sampleRate}`;
-          const socket = new WebSocket(wsUrl, {
+          socket = new WebSocket(wsUrl, {
             headers: { Authorization: `Token ${apiKey}` },
           });
 
@@ -67,31 +106,43 @@ export class DeepgramTTSProvider implements TTSProvider {
                 : `${response.statusCode ?? 'unknown'} ${response.statusMessage ?? ''}`;
               const error = new Error(`Deepgram TTS websocket handshake failed: ${details}`);
               console.error(error.message);
-              controller.error(error);
+              safeError(error);
               closeStream();
             });
           });
 
           socket.on('open', () => {
-            socket.send(
+            if (isClosed) {
+              teardownSocket();
+              return;
+            }
+            const activeSocket = socket;
+            if (!activeSocket) {
+              return;
+            }
+            activeSocket.send(
               JSON.stringify({
                 type: 'Speak',
                 text,
               }),
             );
-            socket.send(JSON.stringify({ type: 'Flush' }));
+            activeSocket.send(JSON.stringify({ type: 'Flush' }));
           });
 
           socket.on('message', (data: WebSocket.Data, isBinary: boolean) => {
+            if (isClosed || hasErrored) {
+              return;
+            }
+
             if (isBinary) {
               if (Buffer.isBuffer(data)) {
-                controller.enqueue(new Uint8Array(data));
+                safeEnqueue(new Uint8Array(data));
               } else if (data instanceof ArrayBuffer) {
-                controller.enqueue(new Uint8Array(data));
+                safeEnqueue(new Uint8Array(data));
               } else if (Array.isArray(data)) {
                 const merged = Buffer.concat(data.filter((chunk): chunk is Buffer => Buffer.isBuffer(chunk)));
                 if (merged.length > 0) {
-                  controller.enqueue(new Uint8Array(merged));
+                  safeEnqueue(new Uint8Array(merged));
                 }
               }
               return;
@@ -113,13 +164,16 @@ export class DeepgramTTSProvider implements TTSProvider {
               const message = JSON.parse(text) as { type?: string; err_msg?: string };
 
               if (message.type === 'Error') {
-                controller.error(new Error(message.err_msg ?? 'Deepgram error'));
-                socket.close();
+                safeError(new Error(message.err_msg ?? 'Deepgram error'));
+                teardownSocket();
               } else if (message.type === 'Flushed') {
-                socket.send(JSON.stringify({ type: 'Close' }));
+                const activeSocket = socket;
+                if (activeSocket) {
+                  activeSocket.send(JSON.stringify({ type: 'Close' }));
+                }
               } else if (message.type === 'Close') {
                 closeStream();
-                socket.close();
+                teardownSocket();
               }
             } catch {
               // no-op
@@ -128,11 +182,15 @@ export class DeepgramTTSProvider implements TTSProvider {
 
           socket.on('error', (error) => {
             console.error('Deepgram TTS websocket error:', error);
-            controller.error(error);
+            safeError(error instanceof Error ? error : new Error('Deepgram TTS websocket error'));
             closeStream();
           });
 
           socket.on('close', closeStream);
+        },
+        cancel() {
+          // Closing the stream from downstream (reader.cancel) should stop incoming websocket frames.
+          // The close handler on the socket will complete stream termination.
         },
       }),
     );
