@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BeliefStoreSchema,
+  ClientHelloPayloadSchema,
   InterventionModeSchema,
   SessionConfigSchema,
   TalkerRequestSchema,
@@ -46,5 +47,19 @@ describe('shared contracts', () => {
       payload: { active: true },
     });
     expect(message.type).toBe('session.status');
+  });
+
+  it('normalises empty participant ids in client hello payloads', () => {
+    const payload = ClientHelloPayloadSchema.parse({
+      clientId: 'quest-client',
+      participantId: '   ',
+      autoStartSession: true,
+      sessionConfig: {
+        interventionMode: 'control',
+        thinkerIntervalSec: 60,
+      },
+    });
+
+    expect(payload.participantId).toBeUndefined();
   });
 });

@@ -57,8 +57,10 @@ export default function AriadneControlPanel() {
   }, []);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem(SESSION_ID_STORAGE_KEY) ?? `session-${crypto.randomUUID()}`;
-    setSessionId(saved);
+    const savedSessionId = window.localStorage.getItem(SESSION_ID_STORAGE_KEY);
+    const normalizedSessionId =
+      savedSessionId && !savedSessionId.startsWith('session-') ? savedSessionId : 'default';
+    setSessionId(normalizedSessionId);
   }, []);
 
   // Fix: Track session status from backend
@@ -235,6 +237,40 @@ export default function AriadneControlPanel() {
         case 'session.status':
           setStatus(event.payload as SessionStatusView);
           break;
+        case 'client.joined': {
+          const payload = event.payload as { connectedClients?: number };
+          const connectedClients = payload.connectedClients;
+          if (typeof connectedClients === 'number') {
+            setStatus((currentStatus) => {
+              if (!currentStatus) {
+                return currentStatus;
+              }
+
+              return {
+                ...currentStatus,
+                connectedClients,
+              };
+            });
+          }
+          break;
+        }
+        case 'client.left': {
+          const payload = event.payload as { connectedClients?: number };
+          const connectedClients = payload.connectedClients;
+          if (typeof connectedClients === 'number') {
+            setStatus((currentStatus) => {
+              if (!currentStatus) {
+                return currentStatus;
+              }
+
+              return {
+                ...currentStatus,
+                connectedClients,
+              };
+            });
+          }
+          break;
+        }
         case 'utterance.final': {
           const payload = event.payload as { text: string; speakerId?: string };
           setMessages((current) => [
@@ -484,11 +520,11 @@ export default function AriadneControlPanel() {
       },
       {
         label: 'Users',
-        value: String(beliefStore?.participants.length ?? 0),
+        value: String(status?.connectedClients ?? 0),
         icon: Activity,
       },
     ],
-    [beliefStore?.participants.length, status?.talkerStatus, status?.thinkerStatus],
+    [status?.connectedClients, status?.talkerStatus, status?.thinkerStatus],
   );
 
   return (

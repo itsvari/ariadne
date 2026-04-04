@@ -31,6 +31,7 @@ export interface SessionStatus {
   active: boolean;
   talkerStatus: 'idle' | 'active' | 'waiting';
   thinkerStatus: 'idle' | 'running' | 'scheduled';
+  connectedClients?: number;
   interventionMode: SessionConfig['interventionMode'];
   thinkerIntervalSec: number;
   lastThinkerRunAt: string | null;
@@ -1096,6 +1097,7 @@ export class AriadneOrchestrator {
       active: session.active,
       talkerStatus: session.talkerStatus,
       thinkerStatus: session.thinkerStatus,
+      connectedClients: this.getIdentifiedClientCount(session),
       interventionMode: session.config.interventionMode,
       thinkerIntervalSec: session.config.thinkerIntervalSec,
       lastThinkerRunAt: session.lastThinkerRunAt,

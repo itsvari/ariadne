@@ -290,7 +290,17 @@ export type WsMessage = z.infer<typeof WsMessageSchema>;
 
 export const ClientHelloPayloadSchema = z.object({
   clientId: z.string().min(1),
-  participantId: z.string().min(1).optional(),
+  participantId: z.preprocess(
+    (value) => {
+      if (typeof value !== 'string') {
+        return value;
+      }
+
+      const trimmedParticipantId = value.trim();
+      return trimmedParticipantId.length > 0 ? trimmedParticipantId : undefined;
+    },
+    z.string().min(1).optional(),
+  ),
   autoStartSession: z.boolean().default(true),
   sessionConfig: SessionConfigSchema.partial().optional(),
 });
