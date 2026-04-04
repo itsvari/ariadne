@@ -453,3 +453,270 @@ describe('startThinkerScheduler', () => {
     controls.stop();
   });
 });
+
+describe('getLastUserMessageSnippet', () => {
+  it('omits last user message section when no user messages exist', async () => {
+    const provider = new MockChatProvider();
+
+    await runThinkerTurn({
+      provider,
+      sessionId: 'session-1',
+      fullHistory: [
+        makeUtterance('Hello', 'assistant', 'alice'),
+      ],
+      worldState: null,
+      currentBeliefStore: makeBeliefStore(),
+    });
+
+    const messages = provider.lastParams?.messages ?? [];
+    const systemMessages = messages.filter((m) => m.role === 'system');
+    const contextMessage = systemMessages.find((m) => m.content?.includes('Last user message'));
+    expect(contextMessage).toBeUndefined();
+  });
+
+  it('truncates long user messages with ellipsis in telemetry', async () => {
+    const provider = new MockChatProvider();
+    const onTelemetry = vi.fn();
+    const longText = 'a'.repeat(300);
+
+    await runThinkerTurn({
+      provider,
+      sessionId: 'session-1',
+      fullHistory: [
+        makeUtterance(longText, 'user', 'alice'),
+      ],
+      worldState: null,
+      currentBeliefStore: makeBeliefStore(),
+      onTelemetry,
+    });
+
+    const requestEvents = onTelemetry.mock.calls.filter(
+      (call) => (call[0] as Record<string, unknown>).type === 'model.request',
+    );
+    expect(requestEvents).toHaveLength(1);
+    const lastUserMessage = (requestEvents[0][0] as Record<string, unknown>).lastUserMessage as string;
+    expect(lastUserMessage).toContain('<truncated>');
+  });
+});
+
+describe('decodeBeliefStoreArgument', () => {
+  it('falls back when store value is non-object', async () => {
+    const provider = new MockChatProvider();
+    const originalStore = makeBeliefStore();
+    originalStore.conversation_summary = 'original summary';
+
+    provider.result = {
+      content: null,
+      tool_calls: [makeToolCall('write_belief_store', JSON.stringify({ store: 42 }))],
+    };
+
+    const result = await runThinkerTurn({
+      provider,
+      sessionId: 'session-1',
+      fullHistory: [],
+      worldState: null,
+      currentBeliefStore: originalStore,
+      toolRuntime: {
+        write_belief_store: vi.fn().mockImplementation(({ store }) => store),
+      },
+      maxToolSteps: 1,
+    });
+
+    expect(result.updatedBeliefStore.conversation_summary).toBe('original summary');
+    expect(result.updatedBeliefStore.version).toBe('v1');
+  });
+
+  it('normalizes participants from string entries', async () => {
+    const provider = new MockChatProvider();
+    const storeWithStrings = makeBeliefStore();
+    storeWithStrings.participants = [
+      { id: 'alice', speakingFrequency: 0, stance: 'unknown', emotionalTone: 'neutral', engagementLevel: 0.5 },
+      { id: 'bob', speakingFrequency: 0, stance: 'unknown', emotionalTone: 'neutral', engagementLevel: 0.5 },
+    ];
+
+    provider.result = {
+      content: null,
+      tool_calls: [makeToolCall('write_belief_store', JSON.stringify({ store: storeWithStrings }))],
+    };
+
+    const result = await runThinkerTurn({
+      provider,
+      sessionId: 'session-1',
+      fullHistory: [],
+      worldState: null,
+      currentBeliefStore: makeBeliefStore(),
+      toolRuntime: {
+        write_belief_store: vi.fn().mockImplementation(({ store }) => store),
+      },
+      maxToolSteps: 1,
+    });
+
+    expect(result.updatedBeliefStore.participants).toHaveLength(2);
+    expect(result.updatedBeliefStore.participants[0].id).toBe('alice');
+  });
+
+  it('normalizes discussion state from string topic', async () => {
+    const provider = new MockChatProvider();
+    const storeWithStringTopic = makeBeliefStore();
+    storeWithStringTopic.discussion_state = 'new topic' as unknown as typeof storeWithStringTopic.discussion_state;
+
+    provider.result = {
+      content: null,
+      tool_calls: [makeToolCall('write_belief_store', JSON.stringify({ store: storeWithStringTopic }))],
+    };
+
+    const result = await runThinkerTurn({
+      provider,
+      sessionId: 'session-1',
+      fullHistory: [],
+      worldState: null,
+      currentBeliefStore: makeBeliefStore(),
+      toolRuntime: {
+        write_belief_store: vi.fn().mockImplementation(({ store }) => store),
+      },
+      maxToolSteps: 1,
+    });
+
+    expect(result.updatedBeliefStore.discussion_state.currentTopic).toBe('new topic');
+  });
+});
+
+describe('decodeDirectiveArgument', () => {
+  it('creates directive from string instruction', async () => {
+    const provider = new MockChatProvider();
+    provider.result = {
+      content: null,
+      tool_calls: [makeToolCall('enqueue_directive', JSON.stringify({ directive: 'Follow up now' }))],
+    };
+
+    const result = await runThinkerTurn({
+      provider,
+      sessionId: 'session-1',
+      fullHistory: [],
+      worldState: null,
+      currentBeliefStore: makeBeliefStore(),
+      toolRuntime: {
+        enqueue_directive: vi.fn().mockResolvedValue({
+          id: 'd1',
+          instruction: 'Follow up now',
+          priority: 'medium',
+          createdAt: new Date().toISOString(),
+        }),
+      },
+      maxToolSteps: 1,
+    });
+
+    expect(result.directives).toHaveLength(1);
+    expect(result.directives[0].instruction).toBe('Follow up now');
+  });
+
+  it('uses default directive for empty string', async () => {
+    const provider = new MockChatProvider();
+    provider.result = {
+      content: null,
+      tool_calls: [makeToolCall('enqueue_directive', JSON.stringify({ directive: '   ' }))],
+    };
+
+    const result = await runThinkerTurn({
+      provider,
+      sessionId: 'session-1',
+      fullHistory: [],
+      worldState: null,
+      currentBeliefStore: makeBeliefStore(),
+      toolRuntime: {
+        enqueue_directive: vi.fn().mockResolvedValue({
+          id: 'd1',
+          instruction: 'Follow up with the group.',
+          priority: 'medium',
+          createdAt: new Date().toISOString(),
+        }),
+      },
+      maxToolSteps: 1,
+    });
+
+    expect(result.directives[0].instruction).toBe('Follow up with the group.');
+  });
+
+  it('normalizes directive priority', async () => {
+    const provider = new MockChatProvider();
+    provider.result = {
+      content: null,
+      tool_calls: [makeToolCall('enqueue_directive', JSON.stringify({
+        directive: { instruction: 'test', priority: 'invalid' },
+      }))],
+    };
+
+    const result = await runThinkerTurn({
+      provider,
+      sessionId: 'session-1',
+      fullHistory: [],
+      worldState: null,
+      currentBeliefStore: makeBeliefStore(),
+      toolRuntime: {
+        enqueue_directive: vi.fn().mockResolvedValue({
+          id: 'd1',
+          instruction: 'test',
+          priority: 'medium',
+          createdAt: new Date().toISOString(),
+        }),
+      },
+      maxToolSteps: 1,
+    });
+
+    expect(result.directives[0].priority).toBe('medium');
+  });
+});
+
+describe('normalizeParticipant', () => {
+  it('handles participant with number id', async () => {
+    const provider = new MockChatProvider();
+    const store = makeBeliefStore();
+    store.participants = [
+      { id: 42, speakingFrequency: 0, stance: 'unknown', emotionalTone: 'neutral', engagementLevel: 0.5 } as unknown as typeof store.participants[number],
+    ];
+
+    provider.result = {
+      content: null,
+      tool_calls: [makeToolCall('write_belief_store', JSON.stringify({ store }))],
+    };
+
+    const result = await runThinkerTurn({
+      provider,
+      sessionId: 'session-1',
+      fullHistory: [],
+      worldState: null,
+      currentBeliefStore: makeBeliefStore(),
+      toolRuntime: {
+        write_belief_store: vi.fn().mockImplementation(({ store: s }) => s),
+      },
+      maxToolSteps: 1,
+    });
+
+    expect(result.updatedBeliefStore.participants[0].id).toBe('42');
+  });
+
+  it('filters out participants with empty string id', async () => {
+    const provider = new MockChatProvider();
+    const store = makeBeliefStore();
+    store.participants = ['  '] as unknown as typeof store.participants[number];
+
+    provider.result = {
+      content: null,
+      tool_calls: [makeToolCall('write_belief_store', JSON.stringify({ store }))],
+    };
+
+    const result = await runThinkerTurn({
+      provider,
+      sessionId: 'session-1',
+      fullHistory: [],
+      worldState: null,
+      currentBeliefStore: makeBeliefStore(),
+      toolRuntime: {
+        write_belief_store: vi.fn().mockImplementation(({ store: s }) => s),
+      },
+      maxToolSteps: 1,
+    });
+
+    expect(result.updatedBeliefStore.participants).toHaveLength(0);
+  });
+});

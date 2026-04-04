@@ -308,3 +308,322 @@ describe('synthesizeSpeech', () => {
     });
   });
 });
+
+describe('DeepgramTTSProvider edge cases', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    vi.resetModules();
+    process.env = { ...originalEnv };
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  it('handles socket error event', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const errorHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'error',
+    )?.[1];
+
+    const error = new Error('Connection refused');
+    errorHandler(error);
+
+    await expect(reader.read()).rejects.toThrow('Connection refused');
+  });
+
+  it('handles socket close event by closing stream', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const closeHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'close',
+    )?.[1];
+
+    closeHandler();
+
+    const { done } = await reader.read();
+    expect(done).toBe(true);
+  });
+
+  it('handles unexpected-response handshake failure', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const unexpectedResponseHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'unexpected-response',
+    )?.[1];
+
+    expect(unexpectedResponseHandler).toBeDefined();
+
+    const mockResponse = {
+      statusCode: 401,
+      statusMessage: 'Unauthorized',
+      on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
+        if (event === 'data') {
+          cb(Buffer.from('{"error":"invalid_api_key"}'));
+        } else if (event === 'end') {
+          cb();
+        }
+      }),
+    };
+
+    unexpectedResponseHandler({}, mockResponse);
+
+    await expect(reader.read()).rejects.toThrow('handshake failed');
+  });
+
+  it('handles unexpected-response without response body', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const unexpectedResponseHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'unexpected-response',
+    )?.[1];
+
+    const mockResponse = {
+      statusCode: 500,
+      statusMessage: 'Internal Server Error',
+      on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
+        if (event === 'end') {
+          cb();
+        }
+      }),
+    };
+
+    unexpectedResponseHandler({}, mockResponse);
+
+    await expect(reader.read()).rejects.toThrow('500 Internal Server Error');
+  });
+
+  it('handles non-Buffer data in unexpected-response', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const unexpectedResponseHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'unexpected-response',
+    )?.[1];
+
+    const mockResponse = {
+      statusCode: 400,
+      statusMessage: 'Bad Request',
+      on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
+        if (event === 'data') {
+          cb('{"error":"bad request"}');
+        } else if (event === 'end') {
+          cb();
+        }
+      }),
+    };
+
+    unexpectedResponseHandler({}, mockResponse);
+
+    await expect(reader.read()).rejects.toThrow('handshake failed');
+  });
+
+  it('handles Buffer text data in message handler', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const messageHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'message',
+    )?.[1];
+
+    const bufferData = Buffer.from(JSON.stringify({ type: 'Close' }));
+    messageHandler(bufferData, false);
+
+    const { done } = await reader.read();
+    expect(done).toBe(true);
+  });
+
+  it('handles ArrayBuffer text data in message handler', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const messageHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'message',
+    )?.[1];
+
+    const textData = JSON.stringify({ type: 'Close' });
+    const encoder = new TextEncoder();
+    const arrayBuffer = encoder.encode(textData).buffer;
+    messageHandler(arrayBuffer, false);
+
+    const { done } = await reader.read();
+    expect(done).toBe(true);
+  });
+
+  it('handles empty text in message handler', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const messageHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'message',
+    )?.[1];
+
+    const bufferData = Buffer.from('');
+    messageHandler(bufferData, false);
+
+    const readPromise = reader.read();
+    await expect(Promise.race([readPromise, new Promise((resolve) => setTimeout(resolve, 50))])).resolves.toBeUndefined();
+    reader.releaseLock();
+  });
+
+  it('handles invalid JSON in text message', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const messageHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'message',
+    )?.[1];
+
+    messageHandler('not valid json', false);
+
+    const readPromise = reader.read();
+    await expect(Promise.race([readPromise, new Promise((resolve) => setTimeout(resolve, 50))])).resolves.toBeUndefined();
+    reader.releaseLock();
+  });
+
+  it('handles Array.isArray data in binary message', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const messageHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'message',
+    )?.[1];
+
+    const chunks = [Buffer.from([0x01, 0x02]), Buffer.from([0x03, 0x04])];
+    messageHandler(chunks, true);
+
+    const { value, done } = await reader.read();
+    expect(done).toBe(false);
+    expect(value).toEqual(new Uint8Array([0x01, 0x02, 0x03, 0x04]));
+    reader.releaseLock();
+  });
+
+  it('handles empty array in binary message', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const messageHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'message',
+    )?.[1];
+
+    messageHandler([], true);
+
+    const readPromise = reader.read();
+    await expect(Promise.race([readPromise, new Promise((resolve) => setTimeout(resolve, 50))])).resolves.toBeUndefined();
+    reader.releaseLock();
+  });
+
+  it('ignores messages after stream is closed', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const messageHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'message',
+    )?.[1];
+
+    messageHandler(JSON.stringify({ type: 'Close' }), false);
+
+    await reader.read();
+
+    messageHandler(Buffer.from([0x01, 0x02]), true);
+  });
+
+  it('teardowns socket when already closed on open', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    const stream = await provider.synthesize('Hello');
+    const reader = stream.getReader();
+
+    const socket = await getMockSocket();
+    const closeHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'close',
+    )?.[1];
+
+    closeHandler();
+    await reader.read();
+
+    const openHandler = socket.on.mock.calls.find(
+      (call: unknown[]) => call[0] === 'open',
+    )?.[1];
+
+    openHandler();
+  });
+
+  it('uses mulaw sample rate of 8000', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    provider.synthesize('Hello', { format: 'mulaw', sampleRate: 8000 });
+
+    const wsCallArgs = await getWsCallArgs();
+    expect(wsCallArgs[0]).toContain('sample_rate=8000');
+  });
+
+  it('uses alaw sample rate of 8000', async () => {
+    const { DeepgramTTSProvider: Provider } = await import('./index');
+    const provider = new Provider('test-key');
+
+    provider.synthesize('Hello', { format: 'alaw', sampleRate: 8000 });
+
+    const wsCallArgs = await getWsCallArgs();
+    expect(wsCallArgs[0]).toContain('sample_rate=8000');
+  });
+});
