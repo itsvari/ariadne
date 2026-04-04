@@ -57,10 +57,9 @@ export default function AriadneControlPanel() {
   }, []);
 
   useEffect(() => {
-    const savedSessionId = window.localStorage.getItem(SESSION_ID_STORAGE_KEY);
-    const normalizedSessionId =
-      savedSessionId && !savedSessionId.startsWith('session-') ? savedSessionId : 'default';
-    setSessionId(normalizedSessionId);
+    const querySessionId = new URLSearchParams(window.location.search).get('sessionId')?.trim();
+    const savedSessionId = window.localStorage.getItem(SESSION_ID_STORAGE_KEY)?.trim();
+    setSessionId(querySessionId || savedSessionId || 'default');
   }, []);
 
   // Fix: Track session status from backend
