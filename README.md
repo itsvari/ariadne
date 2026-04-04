@@ -61,7 +61,7 @@ The server also reads a `.env` inside `apps/server/` — see [`apps/server/READM
 # Start both the server and web control panel in parallel
 npm run dev
 
-# Or individually:
+# Or individually (using Turborepo filters internally):
 npm run dev:server
 npm run dev:web
 ```

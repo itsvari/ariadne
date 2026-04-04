@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, BrainCircuit, Mic, MicOff, Play, Power, Radio, Sparkles } from 'lucide-react';
+import { Activity, BrainCircuit, Mic, MicOff, Play, Power, Radio, Sparkles, Terminal } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import type { BeliefStore } from '@ariadne/shared-contracts';
@@ -26,10 +26,14 @@ export default function AriadneControlPanel() {
   const [beliefStore, setBeliefStore] = useState<BeliefStore | null>(null);
   const [pendingDirectives, setPendingDirectives] = useState<DashboardState['directives']['pending']>([]);
   const [fulfilledDirectives, setFulfilledDirectives] = useState<DashboardState['directives']['fulfilled']>([]);
+  
+  // Local state for dropdowns
   const [interventionMode, setInterventionMode] = useState<'control' | 'light' | 'heavy'>('light');
   const [thinkerIntervalSec, setThinkerIntervalSec] = useState(60);
+  
   const [isBusy, setIsBusy] = useState(false);
   const [audioReady, setAudioReady] = useState(false);
+  
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const eventsEndRef = useRef<HTMLDivElement | null>(null);
   const mediaSourceRef = useRef<MediaSource | null>(null);
@@ -41,15 +45,29 @@ export default function AriadneControlPanel() {
   useEffect(() => {
     const saved = window.localStorage.getItem(SESSION_ID_STORAGE_KEY) ?? `session-${crypto.randomUUID()}`;
     setSessionId(saved);
-    window.localStorage.setItem(SESSION_ID_STORAGE_KEY, saved);
   }, []);
 
+  // Fix: Track session status from backend
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (status) {
+      if (status.interventionMode) setInterventionMode(status.interventionMode);
+      if (status.thinkerIntervalSec) setThinkerIntervalSec(status.thinkerIntervalSec);
+    }
+  }, [status]);
+
+  useEffect(() => {
+    if (sessionId) {
+      window.localStorage.setItem(SESSION_ID_STORAGE_KEY, sessionId);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    // Fix: layout shifts. Use smooth scroll ONLY if within a bounded area, or auto to prevent page jump
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'nearest' });
   }, [messages]);
 
   useEffect(() => {
-    eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    eventsEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'nearest' });
   }, [events]);
 
   const addEvent = useCallback((type: string, details: string) => {
@@ -66,8 +84,7 @@ export default function AriadneControlPanel() {
 
   const flushAudioQueue = useCallback(() => {
     const sourceBuffer = sourceBufferRef.current;
-    const mediaSource = mediaSourceRef.current;
-    if (!sourceBuffer || !mediaSource || sourceBuffer.updating || isAppendingRef.current) {
+    if (!sourceBuffer || sourceBuffer.updating || isAppendingRef.current) {
       return;
     }
 
@@ -78,9 +95,15 @@ export default function AriadneControlPanel() {
 
     isAppendingRef.current = true;
     const chunk = nextChunk.slice();
-    sourceBuffer.appendBuffer(chunk);
+    try {
+      sourceBuffer.appendBuffer(chunk);
+    } catch (e) {
+      console.error("Failed to append buffer", e);
+      isAppendingRef.current = false;
+    }
   }, []);
 
+  // Fix: Audio context synchronously bound to user interaction
   const ensureAudioPipeline = useCallback(() => {
     if (audioRef.current && mediaSourceRef.current && sourceBufferRef.current) {
       return;
@@ -91,6 +114,9 @@ export default function AriadneControlPanel() {
 
     const audio = new Audio(URL.createObjectURL(mediaSource));
     audioRef.current = audio;
+
+    // Trigger play synchronously on user action!
+    audio.play().catch((err) => console.warn('Browser autoplay blocked:', err));
 
     mediaSource.addEventListener('sourceopen', () => {
       if (sourceBufferRef.current) {
@@ -105,9 +131,6 @@ export default function AriadneControlPanel() {
         flushAudioQueue();
       });
       setAudioReady(true);
-      void audio.play().catch(() => {
-        // Browser autoplay rules may delay playback until user interaction.
-      });
       flushAudioQueue();
     });
   }, [flushAudioQueue]);
@@ -213,7 +236,7 @@ export default function AriadneControlPanel() {
           break;
         }
         case 'tts.audio.done':
-          addEvent('TTS', `Audio stream complete (${JSON.stringify(event.payload)})`);
+          addEvent('TTS', `Audio stream complete.`);
           break;
         default:
           addEvent(event.type, JSON.stringify(event.payload));
@@ -334,6 +357,7 @@ export default function AriadneControlPanel() {
 
   const { isRecording, interimResults, startRecording, stopRecording } = useFluxSTT(sendUtterance);
 
+  // Stats mapped for UI
   const stats = useMemo(
     () => [
       {
@@ -347,7 +371,7 @@ export default function AriadneControlPanel() {
         icon: BrainCircuit,
       },
       {
-        label: 'Participants',
+        label: 'Users',
         value: String(beliefStore?.participants.length ?? 0),
         icon: Activity,
       },
@@ -356,363 +380,310 @@ export default function AriadneControlPanel() {
   );
 
   return (
-    <main className="min-h-screen px-4 py-6 md:px-8 md:py-8">
-      <div className="mx-auto flex max-w-7xl flex-col gap-6">
-        <section className="panel scanline rounded-[28px] px-6 py-6 md:px-8 md:py-8">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-            <div className="max-w-3xl space-y-4">
-              <div className="mono inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-1 text-[11px] uppercase tracking-[0.35em] text-[var(--muted)]">
-                <Sparkles className="h-3.5 w-3.5 text-[var(--accent)]" />
-                Ariadne Control Panel
+    <main className="min-h-screen p-4 md:p-8 flex flex-col gap-8 max-w-7xl mx-auto scanline">
+      {/* Header section */}
+      <header className="panel p-6 border-b-4 border-b-[var(--accent)] flex flex-col lg:flex-row gap-6 justify-between items-start lg:items-end">
+        <div className="space-y-4 max-w-2xl">
+          <div className="mono inline-flex items-center gap-2 bg-[var(--text)] text-[var(--bg)] px-3 py-1 text-xs font-bold uppercase tracking-widest">
+            <Terminal size={14} />
+            System Control
+          </div>
+          <h1 className="text-4xl md:text-5xl font-black uppercase tracking-tight text-white leading-none">
+            Ariadne <span className="text-[var(--accent)]">Control Panel</span>
+          </h1>
+          <p className="text-[var(--muted)] font-mono text-sm leading-relaxed border-l-2 border-[var(--border)] pl-4">
+            Live speech capture, thinker scheduling, belief tracking, and directive visibility in one console.
+          </p>
+        </div>
+        
+        <div className="flex gap-4 w-full lg:w-auto">
+          {stats.map((stat) => {
+            const Icon = stat.icon;
+            return (
+              <div key={stat.label} className="panel p-4 flex-1 lg:flex-none lg:w-32">
+                <div className="flex items-center justify-between text-[var(--muted)] mb-3">
+                  <Icon size={16} />
+                </div>
+                <div className="mono text-2xl font-bold uppercase">{stat.value}</div>
+                <div className="font-mono text-[10px] uppercase text-[var(--muted)] mt-1">{stat.label}</div>
               </div>
-              <div className="space-y-3">
-                <h1 className="max-w-3xl text-4xl font-semibold tracking-[-0.04em] text-white md:text-6xl">
-                  Run the talker-thinker loop without losing sight of the room.
-                </h1>
-                <p className="max-w-2xl text-sm leading-7 text-[var(--muted)] md:text-base">
-                  Live speech capture, thinker scheduling, belief tracking, and directive visibility in one orchestration console.
-                </p>
+            );
+          })}
+        </div>
+      </header>
+
+      {/* Main Grid Layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        {/* Left Column (Main Feed & Interactions) */}
+        <div className="lg:col-span-7 flex flex-col gap-8">
+          
+          <section className="panel p-6">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4 border-b border-[var(--border)] pb-4 mb-6">
+              <div>
+                <h2 className="text-2xl font-bold uppercase">Session Controls</h2>
+              </div>
+              <div className="mono text-xs bg-[var(--panel-strong)] px-3 py-1 border border-[var(--border)]">
+                ID: {sessionId || 'WAITING...'}
               </div>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-3">
-              {stats.map((stat) => {
-                const Icon = stat.icon;
-                return (
-                  <div key={stat.label} className="rounded-2xl border border-[var(--border)] bg-[var(--panel-strong)] px-4 py-4">
-                    <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.28em] text-[var(--muted)]">
-                      <span>{stat.label}</span>
-                      <Icon className="h-4 w-4 text-[var(--accent)]" />
-                    </div>
-                    <div className="mt-3 mono text-xl font-semibold text-white">{stat.value}</div>
-                  </div>
-                );
-              })}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 place-items-stretch">
+              <label className="flex flex-col gap-2">
+                <span className="mono text-xs text-[var(--muted)] uppercase font-bold tracking-widest">Intervention Mode</span>
+                <select
+                  value={interventionMode}
+                  onChange={(event) => setInterventionMode(event.target.value as typeof interventionMode)}
+                  className="bg-[var(--bg)] border-2 border-[var(--border)] px-4 py-3 outline-none text-white focus:border-[var(--accent)] font-mono text-sm"
+                >
+                  <option value="control">Control (Manual)</option>
+                  <option value="light">Light (Supervised)</option>
+                  <option value="heavy">Heavy (Autonomous)</option>
+                </select>
+              </label>
+
+              <label className="flex flex-col gap-2">
+                <span className="mono text-xs text-[var(--muted)] uppercase font-bold tracking-widest">Thinker Interval</span>
+                <select
+                  value={thinkerIntervalSec}
+                  onChange={(event) => setThinkerIntervalSec(Number(event.target.value))}
+                  className="bg-[var(--bg)] border-2 border-[var(--border)] px-4 py-3 outline-none text-white focus:border-[var(--accent)] font-mono text-sm"
+                >
+                  {INTERVAL_OPTIONS.map((o) => (
+                    <option key={o} value={o}>{o}s INTERVAL</option>
+                  ))}
+                </select>
+              </label>
             </div>
-          </div>
-        </section>
 
-        <section className="grid gap-6 xl:grid-cols-[1.35fr_0.95fr]">
-          <div className="flex flex-col gap-6">
-            <section className="panel rounded-[24px] p-5 md:p-6">
-              <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
-                <div>
-                  <p className="mono text-[11px] uppercase tracking-[0.3em] text-[var(--muted)]">Session Controls</p>
-                  <h2 className="mt-2 text-2xl font-semibold text-white">Realtime orchestration</h2>
+            <div className="mt-6 flex flex-col sm:flex-row gap-4">
+              <input
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void sendUtterance(input);
+                }}
+                placeholder="Type something..."
+                className="flex-1 bg-[var(--bg)] border-2 border-[var(--border)] px-4 py-3 focus:border-[var(--accent)] font-mono outline-none placeholder-[var(--muted)]"
+              />
+              <button 
+                className="btn-brutal"
+                onClick={() => void sendUtterance(input)}
+              >
+                Send
+              </button>
+            </div>
+
+            <div className="mt-6 flex flex-wrap items-center gap-4 bg-[var(--bg)] p-4 border border-[var(--border)]">
+              <button onClick={() => void startSession()} disabled={isBusy} className="btn-brutal btn-accent">
+                <Power size={16} /> Start
+              </button>
+              <button onClick={() => void stopSession()} disabled={isBusy} className="btn-brutal text-[var(--danger)] hover:border-[var(--danger)] hover:text-[var(--danger)]">
+                Stop
+              </button>
+              <button onClick={() => void triggerThinker()} disabled={isBusy || !status?.active} className="btn-brutal">
+                <BrainCircuit size={16} /> Trigger Thinker
+              </button>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-4 border-t border-[var(--border)] pt-4">
+              <button
+                onClick={isRecording ? stopRecording : () => void startRecording()}
+                className={cn('btn-brutal', isRecording && 'border-[var(--danger)] text-[var(--danger)]')}
+              >
+                {isRecording ? <MicOff size={16} /> : <Mic size={16} />}
+                {isRecording ? 'Stop Microphone' : 'Start Microphone'}
+              </button>
+              <button
+                onClick={() => ensureAudioPipeline()}
+                className={cn('btn-brutal', audioReady && 'border-[var(--accent)] text-[var(--accent)]')}
+              >
+                <Play size={16} />
+                {audioReady ? 'Audio Ready' : 'Prime Audio'}
+              </button>
+            </div>
+            
+            {interimResults.size > 0 && (
+              <div className="mt-4 bg-[var(--panel-strong)] p-3 border-l-4 border-[var(--accent-warm)] font-mono text-sm text-[var(--accent-warm)]">
+                {Array.from(interimResults.entries()).map(([speaker, text]) => (
+                  <div key={speaker}>[{speaker}]: {text}</div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="panel p-6 flex flex-col flex-1 relative">
+            <h2 className="text-2xl font-bold uppercase mb-4 sticky top-0 bg-[var(--panel)] z-10 pb-2">Conversation Feed</h2>
+            <div className="flex-1 overflow-y-auto pr-2 scrollbar-brutal flex flex-col gap-4" style={{ height: '600px' }}>
+              {messages.length === 0 ? (
+                <div className="h-full flex items-center justify-center font-mono text-[var(--muted)] border-2 border-dashed border-[var(--border)]">
+                  // NO DATA IN BUFFER //
                 </div>
-                <p className="mono text-xs text-[var(--muted)]">Session ID: {sessionId || 'initializing...'}</p>
-              </div>
-
-              <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <label className="space-y-2">
-                  <span className="mono text-[11px] uppercase tracking-[0.26em] text-[var(--muted)]">Intervention</span>
-                  <select
-                    value={interventionMode}
-                    onChange={(event) => setInterventionMode(event.target.value as typeof interventionMode)}
-                    className="w-full rounded-2xl border border-[var(--border)] bg-[var(--panel-strong)] px-4 py-3 text-sm text-white outline-none"
-                  >
-                    <option value="control">Control</option>
-                    <option value="light">Light</option>
-                    <option value="heavy">Heavy</option>
-                  </select>
-                </label>
-
-                <label className="space-y-2">
-                  <span className="mono text-[11px] uppercase tracking-[0.26em] text-[var(--muted)]">Thinker Interval</span>
-                  <select
-                    value={thinkerIntervalSec}
-                    onChange={(event) => setThinkerIntervalSec(Number(event.target.value))}
-                    className="w-full rounded-2xl border border-[var(--border)] bg-[var(--panel-strong)] px-4 py-3 text-sm text-white outline-none"
-                  >
-                    {INTERVAL_OPTIONS.map((option) => (
-                      <option key={option} value={option}>
-                        {option}s
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="space-y-2 md:col-span-2 xl:col-span-1">
-                  <span className="mono text-[11px] uppercase tracking-[0.26em] text-[var(--muted)]">Manual Utterance</span>
-                  <input
-                    value={input}
-                    onChange={(event) => setInput(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        void sendUtterance(input);
-                      }
-                    }}
-                    placeholder="Type something Ariadne should hear"
-                    className="w-full rounded-2xl border border-[var(--border)] bg-[var(--panel-strong)] px-4 py-3 text-sm text-white outline-none placeholder:text-[var(--muted)]"
-                  />
-                </label>
-
-                <div className="grid gap-2 md:col-span-2 xl:col-span-1">
-                  <button
-                    onClick={() => void startSession()}
-                    disabled={isBusy}
-                    className="inline-flex items-center justify-center gap-2 rounded-2xl bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:opacity-60"
-                  >
-                    <Power className="h-4 w-4" />
-                    Start / Apply
-                  </button>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => void stopSession()}
-                      disabled={isBusy}
-                      className="inline-flex items-center justify-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--panel-strong)] px-4 py-3 text-sm text-white transition hover:border-[var(--danger)] hover:text-[var(--danger)] disabled:opacity-60"
-                    >
-                      Stop
-                    </button>
-                    <button
-                      onClick={() => void triggerThinker()}
-                      disabled={isBusy || !status?.active}
-                      className="inline-flex items-center justify-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--panel-strong)] px-4 py-3 text-sm text-white transition hover:border-[var(--accent-warm)] hover:text-[var(--accent-warm)] disabled:opacity-60"
-                    >
-                      <BrainCircuit className="h-4 w-4" />
-                      Trigger
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-6 flex flex-wrap items-center gap-3">
-                <button
-                  onClick={isRecording ? stopRecording : () => void startRecording()}
-                  className={cn(
-                    'inline-flex items-center gap-2 rounded-full px-5 py-3 text-sm font-medium transition',
-                    isRecording
-                      ? 'bg-[var(--danger)] text-slate-950 hover:brightness-110'
-                      : 'border border-[var(--border)] bg-[var(--panel-strong)] text-white hover:border-[var(--accent)] hover:text-[var(--accent)]',
-                  )}
-                >
-                  {isRecording ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-                  {isRecording ? 'Stop microphone' : 'Start microphone'}
-                </button>
-                <button
-                  onClick={() => ensureAudioPipeline()}
-                  className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--panel-strong)] px-5 py-3 text-sm text-white transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
-                >
-                  <Play className="h-4 w-4" />
-                  {audioReady ? 'Audio ready' : 'Prime audio'}
-                </button>
-                {interimResults.size > 0 && (
-                  <span className="mono text-xs text-[var(--accent-warm)]">
-                    {Array.from(interimResults.entries()).map(([speaker, text]) => (
-                      <span key={speaker} className="mr-3">[{speaker}]: {text}</span>
-                    ))}
-                  </span>
-                )}
-              </div>
-            </section>
-
-            <section className="panel rounded-[24px] p-5 md:p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="mono text-[11px] uppercase tracking-[0.3em] text-[var(--muted)]">Conversation Feed</p>
-                  <h2 className="mt-2 text-2xl font-semibold text-white">Live transcript and model actions</h2>
-                </div>
-              </div>
-
-              <div className="mt-6 space-y-4 overflow-y-auto pr-2" style={{ maxHeight: '38rem' }}>
-                {messages.length === 0 ? (
-                  <div className="rounded-3xl border border-dashed border-[var(--border)] px-5 py-8 text-center text-sm text-[var(--muted)]">
-                    Start a session, then speak or type an utterance to see the talker-thinker loop unfold.
-                  </div>
-                ) : (
-                  messages.map((message) => (
-                    <article
-                      key={message.id}
-                      className={cn(
-                        'rounded-3xl border px-5 py-4',
-                        message.role === 'assistant'
-                          ? 'border-[rgba(112,214,193,0.22)] bg-[rgba(10,30,40,0.72)]'
-                          : message.role === 'user'
-                            ? 'border-[rgba(241,191,122,0.22)] bg-[rgba(40,26,11,0.36)]'
-                            : 'border-[var(--border)] bg-[var(--panel-strong)]',
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="mono text-[11px] uppercase tracking-[0.3em] text-[var(--muted)]">
-                          {message.role}
-                          {message.speakerId ? ` / ${message.speakerId}` : ''}
-                        </span>
-                      </div>
-                      {message.reasoning && (
-                        <p className="mono mt-3 rounded-2xl border border-[var(--border)] bg-[rgba(255,255,255,0.02)] px-3 py-2 text-xs leading-6 text-[var(--muted)]">
-                          {message.reasoning}
-                        </p>
-                      )}
-                      {message.toolCalls?.length ? (
-                        <div className="mt-3 space-y-2">
-                          {message.toolCalls.map((toolCall, index) => (
-                            <pre
-                              key={`${message.id}-${index}`}
-                              className="mono overflow-x-auto rounded-2xl border border-[var(--border)] bg-[rgba(255,255,255,0.02)] px-3 py-2 text-xs text-[var(--accent)]"
-                            >
-                              {toolCall.function.name}: {toolCall.function.arguments}
-                            </pre>
-                          ))}
-                        </div>
-                      ) : null}
-                      <p className="mt-3 text-sm leading-7 text-white/90">{message.content || 'No direct text output.'}</p>
-                    </article>
-                  ))
-                )}
-                <div ref={messagesEndRef} />
-              </div>
-            </section>
-          </div>
-
-          <div className="flex flex-col gap-6">
-            <section className="panel rounded-[24px] p-5 md:p-6">
-              <div>
-                <p className="mono text-[11px] uppercase tracking-[0.3em] text-[var(--muted)]">Session Status</p>
-                <h2 className="mt-2 text-2xl font-semibold text-white">Talker-thinker heartbeat</h2>
-              </div>
-
-              <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                <MetricCard label="Server" value={DEFAULT_SERVER_URL.replace(/^https?:\/\//, '')} tone="accent" />
-                <MetricCard label="Mode" value={status?.interventionMode ?? interventionMode} tone="warm" />
-                <MetricCard label="Thinker Interval" value={`${status?.thinkerIntervalSec ?? thinkerIntervalSec}s`} tone="neutral" />
-                <MetricCard label="Last Thinker Run" value={status?.lastThinkerRunAt ? new Date(status.lastThinkerRunAt).toLocaleTimeString() : 'Not yet'} tone="neutral" />
-              </div>
-            </section>
-
-            <section className="panel rounded-[24px] p-5 md:p-6">
-              <div>
-                <p className="mono text-[11px] uppercase tracking-[0.3em] text-[var(--muted)]">Belief Store</p>
-                <h2 className="mt-2 text-2xl font-semibold text-white">Strategic memory snapshot</h2>
-              </div>
-
-              <div className="mt-5 space-y-4 text-sm text-[var(--muted)]">
-                <div className="rounded-3xl border border-[var(--border)] bg-[var(--panel-strong)] p-4">
-                  <p className="mono text-[11px] uppercase tracking-[0.26em]">Discussion State</p>
-                  <p className="mt-3 text-white">{beliefStore?.discussion_state.currentTopic ?? 'No topic yet'}</p>
-                  <p className="mt-2">Phase: {beliefStore?.discussion_state.phase ?? 'Unknown'}</p>
-                  <p className="mt-2">Open questions: {(beliefStore?.discussion_state.openQuestions ?? []).join(', ') || 'None recorded'}</p>
-                </div>
-
-                <div className="rounded-3xl border border-[var(--border)] bg-[var(--panel-strong)] p-4">
-                  <p className="mono text-[11px] uppercase tracking-[0.26em]">Facilitation Plan</p>
-                  <ul className="mt-3 space-y-2 text-white">
-                    {(beliefStore?.facilitation_plan ?? []).length ? (
-                      beliefStore?.facilitation_plan.map((item) => <li key={item}>- {item}</li>)
-                    ) : (
-                      <li>- Thinker has not written a plan yet.</li>
+              ) : (
+                messages.map((message) => (
+                  <article
+                    key={message.id}
+                    className={cn(
+                      'border-2 p-4 font-mono text-sm transition-all',
+                      message.role === 'assistant'
+                        ? 'border-[var(--accent)] bg-[rgba(255,71,15,0.05)] ml-4'
+                        : message.role === 'user'
+                          ? 'border-[var(--text)] bg-[var(--panel-strong)] mr-4'
+                          : 'border-[var(--border)]'
                     )}
-                  </ul>
-                </div>
+                  >
+                    <div className="flex justify-between items-center text-[10px] uppercase font-bold text-[var(--muted)] border-b border-[var(--border)] pb-2 mb-3">
+                      <span>{message.role} {message.speakerId ? `[${message.speakerId}]` : ''}</span>
+                    </div>
 
-                <div className="rounded-3xl border border-[var(--border)] bg-[var(--panel-strong)] p-4">
-                  <p className="mono text-[11px] uppercase tracking-[0.26em]">Participants</p>
-                  <div className="mt-3 space-y-3">
-                    {(beliefStore?.participants ?? []).length ? (
-                      beliefStore?.participants.map((participant) => (
-                        <div key={participant.id} className="rounded-2xl border border-[var(--border)] px-3 py-3 text-white">
-                          <div className="mono text-xs text-[var(--accent)]">{participant.id}</div>
-                          <div className="mt-2 text-sm text-[var(--muted)]">
-                            stance: {participant.stance} / tone: {participant.emotionalTone} / engagement: {participant.engagementLevel}
+                    {message.reasoning && (
+                      <div className="bg-[var(--bg)] border-l-4 border-[var(--muted)] p-3 mb-3 text-xs text-[var(--muted)]">
+                        {message.reasoning}
+                      </div>
+                    )}
+
+                    {message.toolCalls?.length ? (
+                      <div className="flex flex-col gap-2 mb-3">
+                        {message.toolCalls.map((tc, idx) => (
+                          <div key={idx} className="bg-[var(--panel-strong)] border border-[var(--accent-warm)] p-2 text-xs text-[var(--accent-warm)]">
+                            <span className="font-bold">{tc.function.name}</span>() &rarr; {tc.function.arguments}
                           </div>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-white">No participants modeled yet.</p>
-                    )}
-                  </div>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    <div className="text-[var(--text)] leading-relaxed whitespace-pre-wrap">
+                      {message.content || '[NO CONTENT]'}
+                    </div>
+                  </article>
+                ))
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+          </section>
+
+        </div>
+
+        {/* Right Column (Metrics & Logs) */}
+        <div className="lg:col-span-5 flex flex-col gap-8">
+          
+          <section className="panel p-6">
+            <h2 className="text-xl font-bold uppercase border-b border-[var(--border)] pb-2 mb-4">Session Status</h2>
+            <div className="grid grid-cols-2 gap-3 text-sm font-mono">
+              <div className="bg-[var(--bg)] border border-[var(--border)] p-3">
+                <div className="text-[10px] text-[var(--muted)] mb-1">SERVER</div>
+                <div className="text-white truncate" title={DEFAULT_SERVER_URL}>{DEFAULT_SERVER_URL.replace(/^https?:\/\//, '')}</div>
+              </div>
+              <div className="bg-[var(--bg)] border border-[var(--border)] p-3">
+                <div className="text-[10px] text-[var(--muted)] mb-1">SERVER MODE</div>
+                <div className="text-[var(--accent-warm)]">{status?.interventionMode ?? interventionMode}</div>
+              </div>
+              <div className="bg-[var(--bg)] border border-[var(--border)] p-3 col-span-2 flex justify-between">
+                <div>
+                  <div className="text-[10px] text-[var(--muted)] mb-1">LAST THINKER</div>
+                  <div className="text-white">{status?.lastThinkerRunAt ? new Date(status.lastThinkerRunAt).toLocaleTimeString() : 'N/A'}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[10px] text-[var(--muted)] mb-1">INTERVAL</div>
+                  <div className="text-white">{status?.thinkerIntervalSec ?? thinkerIntervalSec}s</div>
                 </div>
               </div>
-            </section>
+            </div>
+          </section>
 
-            <section className="panel rounded-[24px] p-5 md:p-6">
-              <div>
-                <p className="mono text-[11px] uppercase tracking-[0.3em] text-[var(--muted)]">Directive Queue</p>
-                <h2 className="mt-2 text-2xl font-semibold text-white">Pending and fulfilled prompts</h2>
+          <section className="panel p-6">
+            <h2 className="text-xl font-bold uppercase border-b border-[var(--border)] pb-2 mb-4">Belief Store</h2>
+            
+            <div className="flex flex-col gap-4 font-mono text-sm">
+              <div className="border border-[var(--border)] bg-[var(--bg)]">
+                <div className="bg-[var(--text)] text-[var(--bg)] px-3 py-1 text-xs font-bold uppercase">Discussion State</div>
+                <div className="p-3">
+                  <div className="text-[var(--text)]">{beliefStore?.discussion_state.currentTopic ?? 'NO TOPIC'}</div>
+                  <div className="text-xs text-[var(--muted)] mt-2">PHASE: {beliefStore?.discussion_state.phase ?? 'UNKNOWN'}</div>
+                  <div className="text-xs text-[var(--muted)] mt-1">OPEN q: {(beliefStore?.discussion_state.openQuestions ?? []).join(', ') || 'NONE'}</div>
+                </div>
               </div>
 
-              <div className="mt-5 grid gap-4 lg:grid-cols-2">
-                <DirectiveList title="Pending" items={pendingDirectives} empty="No pending directives." />
-                <DirectiveList title="Fulfilled" items={fulfilledDirectives} empty="No fulfilled directives yet." />
+              <div className="border border-[var(--border)] bg-[var(--bg)]">
+                <div className="bg-[var(--text)] text-[var(--bg)] px-3 py-1 text-xs font-bold uppercase">Plan</div>
+                <ul className="p-3 space-y-1 text-xs text-[var(--text)] list-disc list-inside">
+                  {(beliefStore?.facilitation_plan ?? []).length ? (
+                    beliefStore?.facilitation_plan.map((item, idx) => <li key={idx}>{item}</li>)
+                  ) : (
+                    <li className="list-none text-[var(--muted)]">NO PLAN DETECTED</li>
+                  )}
+                </ul>
               </div>
-            </section>
 
-            <section className="panel rounded-[24px] p-5 md:p-6">
-              <div>
-                <p className="mono text-[11px] uppercase tracking-[0.3em] text-[var(--muted)]">System Events</p>
-                <h2 className="mt-2 text-2xl font-semibold text-white">Operational log</h2>
-              </div>
-
-              <div className="mt-5 space-y-2 overflow-y-auto pr-1" style={{ maxHeight: '24rem' }}>
-                {events.length === 0 ? (
-                  <div className="rounded-3xl border border-dashed border-[var(--border)] px-5 py-8 text-center text-sm text-[var(--muted)]">
-                    Events will stream here once the session is active.
-                  </div>
-                ) : (
-                  events.map((event) => (
-                    <div key={event.id} className="rounded-2xl border border-[var(--border)] bg-[var(--panel-strong)] px-4 py-3">
-                      <div className="flex items-center justify-between gap-4">
-                        <span className="mono text-[11px] uppercase tracking-[0.26em] text-[var(--accent)]">{event.type}</span>
-                        <span className="mono text-[11px] text-[var(--muted)]">{new Date(event.timestamp).toLocaleTimeString()}</span>
+              <div className="border border-[var(--border)] bg-[var(--bg)]">
+                <div className="bg-[var(--text)] text-[var(--bg)] px-3 py-1 text-xs font-bold uppercase">Actors</div>
+                <div className="p-3 flex flex-col gap-2">
+                  {(beliefStore?.participants ?? []).length ? (
+                    beliefStore?.participants.map((p) => (
+                      <div key={p.id} className="border border-[var(--border)] p-2">
+                        <div className="text-[var(--accent)] font-bold">{p.id}</div>
+                        <div className="text-xs mt-1 text-[var(--muted)]">
+                          {p.stance} | {p.emotionalTone} | {p.engagementLevel}
+                        </div>
                       </div>
-                      <p className="mt-2 text-sm leading-6 text-white/85">{event.details}</p>
-                    </div>
-                  ))
-                )}
-                <div ref={eventsEndRef} />
+                    ))
+                  ) : (
+                    <div className="text-xs text-[var(--muted)]">NO ACTORS</div>
+                  )}
+                </div>
               </div>
-            </section>
-          </div>
-        </section>
+            </div>
+          </section>
+
+          <section className="panel p-6">
+            <h2 className="text-xl font-bold uppercase border-b border-[var(--danger)] pb-2 mb-4 text-[var(--danger)]">Directives</h2>
+            <div className="flex flex-col gap-4 font-mono text-xs">
+              <div>
+                <div className="text-[var(--muted)] mb-2 font-bold uppercase">Pending Queue</div>
+                <div className="space-y-2">
+                  {pendingDirectives.length === 0 && <div className="text-[var(--muted)]">EMPTY</div>}
+                  {pendingDirectives.map(d => (
+                    <div key={d.id} className="border-l-4 border-[var(--accent-warm)] bg-[var(--panel-strong)] p-2 text-[var(--text)]">
+                      <div className="flex justify-between text-[10px] text-[var(--muted)] mb-1">
+                        <span>{d.priority}</span>
+                        <span>{new Date(d.createdAt).toLocaleTimeString()}</span>
+                      </div>
+                      {d.instruction}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="text-[var(--muted)] mb-2 font-bold uppercase">Fulfilled</div>
+                <div className="space-y-2 text-[var(--muted)] opacity-70">
+                  {fulfilledDirectives.length === 0 && <div>EMPTY</div>}
+                  {fulfilledDirectives.map(d => (
+                    <div key={d.id} className="border-l-2 border-[var(--border)] bg-[var(--bg)] p-2">
+                      {d.instruction}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel p-6">
+            <h2 className="text-xl font-bold uppercase border-b border-[var(--border)] pb-2 mb-4">Event Log</h2>
+            <div className="overflow-y-auto scrollbar-brutal font-mono text-xs space-y-2 pr-2 flex flex-col" style={{ height: '240px' }}>
+              {events.map(ev => (
+                <div key={ev.id} className="bg-[var(--bg)] border border-[var(--border)] p-2">
+                  <div className="flex justify-between text-[9px] text-[var(--accent)] mb-1 uppercase tracking-widest">
+                    <span>{ev.type}</span>
+                    <span>{new Date(ev.timestamp).toLocaleTimeString()}</span>
+                  </div>
+                  <div className="text-[var(--text)] break-all">{ev.details}</div>
+                </div>
+              ))}
+              <div ref={eventsEndRef} />
+            </div>
+          </section>
+
+        </div>
       </div>
     </main>
-  );
-}
-
-function MetricCard({ label, value, tone }: { label: string; value: string; tone: 'accent' | 'warm' | 'neutral' }) {
-  return (
-    <div
-      className={cn(
-        'rounded-3xl border px-4 py-4',
-        tone === 'accent'
-          ? 'border-[rgba(112,214,193,0.26)] bg-[rgba(9,28,33,0.92)]'
-          : tone === 'warm'
-            ? 'border-[rgba(241,191,122,0.26)] bg-[rgba(37,28,16,0.78)]'
-            : 'border-[var(--border)] bg-[var(--panel-strong)]',
-      )}
-    >
-      <p className="mono text-[11px] uppercase tracking-[0.26em] text-[var(--muted)]">{label}</p>
-      <p className="mt-3 text-lg font-semibold text-white">{value}</p>
-    </div>
-  );
-}
-
-function DirectiveList({
-  title,
-  items,
-  empty,
-}: {
-  title: string;
-  items: Array<{ id: string; instruction: string; priority: string; createdAt: string }>;
-  empty: string;
-}) {
-  return (
-    <div className="rounded-3xl border border-[var(--border)] bg-[var(--panel-strong)] p-4">
-      <p className="mono text-[11px] uppercase tracking-[0.26em] text-[var(--muted)]">{title}</p>
-      <div className="mt-3 space-y-3">
-        {items.length ? (
-          items.map((item) => (
-            <div key={item.id} className="rounded-2xl border border-[var(--border)] px-3 py-3">
-              <div className="flex items-center justify-between gap-3">
-                <span className="mono text-xs text-[var(--accent)]">{item.priority}</span>
-                <span className="mono text-[11px] text-[var(--muted)]">{new Date(item.createdAt).toLocaleTimeString()}</span>
-              </div>
-              <p className="mt-2 text-sm leading-6 text-white">{item.instruction}</p>
-            </div>
-          ))
-        ) : (
-          <p className="text-sm text-white/80">{empty}</p>
-        )}
-      </div>
-    </div>
   );
 }

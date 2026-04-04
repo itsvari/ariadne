@@ -88,12 +88,8 @@ export class AriadneOrchestrator {
 
   constructor(options: AriadneOrchestratorOptions) {
     this.beliefStore = options.beliefStore;
-    this.talkerProvider = options.talkerProvider ?? new OpenRouterChatProvider();
-    this.thinkerProvider =
-      options.thinkerProvider ??
-      (process.env.CEREBRAS_API_KEY
-        ? new CerebrasChatProvider()
-        : this.talkerProvider);
+    this.talkerProvider = options.talkerProvider ?? new CerebrasChatProvider();
+    this.thinkerProvider = options.thinkerProvider ?? new OpenRouterChatProvider();
     this.ttsProvider = options.ttsProvider ?? new DeepgramTTSProvider();
     this.transcribeAudio = options.transcribeAudio;
 
@@ -252,6 +248,7 @@ export class AriadneOrchestrator {
           fullHistory: history,
           worldState,
           currentBeliefStore,
+          model: process.env.OPENROUTER_THINKER_MODEL ?? 'openrouter/hunter-alpha',
           toolRuntime: {
             write_belief_store: async ({ store }) => {
               const nextStore = store ?? currentBeliefStore;
@@ -335,6 +332,7 @@ export class AriadneOrchestrator {
       const result = await runTalkerTurn({
         provider: this.talkerProvider,
         request,
+        model: process.env.CEREBRAS_TALKER_MODEL ?? 'gpt-oss-120b',
         toolRuntime: {
           speak: async ({ text }) => {
             const spokenText = text?.trim() ?? '';

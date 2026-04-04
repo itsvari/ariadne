@@ -44,10 +44,8 @@ async function bootstrap(): Promise<void> {
     throw new Error('Valkey health check failed');
   }
 
-  const talkerProvider = new OpenRouterChatProvider();
-  const thinkerProvider = process.env.CEREBRAS_API_KEY
-    ? new CerebrasChatProvider()
-    : talkerProvider;
+  const talkerProvider = new CerebrasChatProvider();
+  const thinkerProvider = new OpenRouterChatProvider();
   const ttsProvider = new DeepgramTTSProvider();
   const deepgram = process.env.DEEPGRAM_API_KEY
     ? new DeepgramClient({ apiKey: process.env.DEEPGRAM_API_KEY })
@@ -79,7 +77,7 @@ async function bootstrap(): Promise<void> {
 
   app.post('/session/start', async (req, res) => {
     try {
-      const sessionId = crypto.randomUUID();
+      const sessionId = String(req.body.sessionId || crypto.randomUUID());
       const status = await orchestrator.startSession(sessionId, req.body.sessionConfig ?? {});
       res.json(status);
     } catch (error) {

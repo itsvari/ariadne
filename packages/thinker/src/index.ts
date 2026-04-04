@@ -58,7 +58,7 @@ export async function runThinkerTurn(
     fullHistory,
     worldState,
     currentBeliefStore,
-    model = process.env.CEREBRAS_THINKER_MODEL ?? 'gpt-oss-120b',
+    model = process.env.OPENROUTER_MODEL ?? 'openrouter/hunter-alpha',
     toolRuntime,
     maxToolSteps = 4,
     onTelemetry,

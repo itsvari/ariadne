@@ -175,7 +175,8 @@ ariadne/
 | `OPENROUTER_MODEL` | No | Override the default OpenRouter model (e.g. `google/gemini-2.0-flash-001`). |
 | `OPENROUTER_BASE_URL` | No | Override the OpenRouter base URL (default: `https://openrouter.ai/api/v1`). |
 | `CEREBRAS_API_KEY` | No | Cerebras API key. When set, the Thinker uses Cerebras instead of OpenRouter. |
-| `DEEPGRAM_API_KEY` | **Yes** (server) | Powers both STT (`/utterance/audio`) and TTS synthesis over WebSocket. |
+| `DEEPGRAM_API_KEY` | **Yes** (server) | API key for server-side TTS synthesis and STT transcription. |
+| `NEXT_PUBLIC_DEEPGRAM_API_KEY` | **Yes** (web) | API key for browser-side STT transcription in the control panel. |
 | `VALKEY_URL` | No | Valkey connection URL (default: `valkey://localhost:6379`). |
 | `NEXT_PUBLIC_SERVER_URL` | No | Server base URL for the web control panel (default: `http://localhost:8081`). |
 | `PORT` | No | HTTP port for the server (default: `8081`). |
