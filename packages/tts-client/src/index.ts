@@ -3,6 +3,16 @@ import type { TTSProvider, TTSRequest } from '@ariadne/shared-contracts';
 
 const DEEPGRAM_WS_URL = 'wss://api.deepgram.com/v1/speak';
 
+function resolveDeepgramEncoding(format?: string): 'mp3' | 'opus' | 'linear16' {
+  if (format === 'opus') {
+    return 'opus';
+  }
+  if (format === 'pcm') {
+    return 'linear16';
+  }
+  return 'mp3';
+}
+
 export class DeepgramTTSProvider implements TTSProvider {
   private apiKey: string;
 
@@ -19,7 +29,7 @@ export class DeepgramTTSProvider implements TTSProvider {
     options?: { voiceId?: string; format?: string; sampleRate?: number },
   ): Promise<ReadableStream<Uint8Array>> {
     const model = options?.voiceId ?? 'aura-2-thalia-en';
-    const encoding = options?.format ?? 'linear16';
+    const encoding = resolveDeepgramEncoding(options?.format);
     const sampleRate = options?.sampleRate ?? 24000;
     const apiKey = this.apiKey;
 

@@ -57,11 +57,14 @@ async function bootstrap(): Promise<void> {
     talkerProvider,
     thinkerProvider,
     ttsProvider,
-    transcribeAudio: async ({ audioBuffer }) => {
+    transcribeAudio: async ({ audioBuffer, sampleRateHz, channels }) => {
       if (!deepgram) {
         return null;
       }
-      return transcribeAudioBuffer(deepgram, audioBuffer);
+      return transcribeAudioBuffer(deepgram, audioBuffer, {
+        sampleRateHz,
+        channels,
+      });
     },
   });
 
@@ -122,6 +125,8 @@ async function bootstrap(): Promise<void> {
       const sessionId = String(req.body.sessionId ?? '');
       const speakerId = req.body.speakerId ? String(req.body.speakerId) : undefined;
       const audioBase64 = String(req.body.audioBase64 ?? '');
+      const sampleRateHz = Number(req.body.sampleRateHz ?? 16000);
+      const channels = Number(req.body.channels ?? 1);
 
       if (!audioBase64) {
         res.status(400).json({ error: 'No audio data received.' });
@@ -129,7 +134,10 @@ async function bootstrap(): Promise<void> {
       }
 
       const audioBuffer = Buffer.from(audioBase64, 'base64');
-      const transcript = await transcribeAudioBuffer(deepgram, audioBuffer);
+      const transcript = await transcribeAudioBuffer(deepgram, audioBuffer, {
+        sampleRateHz,
+        channels,
+      });
       if (!transcript) {
         res.json({ ok: true, transcript: '' });
         return;
@@ -267,11 +275,22 @@ function parseDiscoveryRequest(rawMessage: Buffer): DiscoveryRequest | null {
 async function transcribeAudioBuffer(
   deepgram: DeepgramClient,
   audioBuffer: Buffer,
+  options?: {
+    sampleRateHz?: number;
+    channels?: number;
+  },
 ): Promise<string | null> {
-  const result = await deepgram.listen.v1.media.transcribeFile(audioBuffer, {
+  const sampleRateHz = options?.sampleRateHz ?? 16000;
+  const channels = options?.channels ?? 1;
+
+  const request = {
     model: 'nova-3',
     encoding: 'linear16',
-  });
+    sample_rate: sampleRateHz,
+    channels,
+  } as unknown as Parameters<typeof deepgram.listen.v1.media.transcribeFile>[1];
+
+  const result = await deepgram.listen.v1.media.transcribeFile(audioBuffer, request);
 
   const transcript = 'results' in result
     ? result.results?.channels[0]?.alternatives?.[0]?.transcript?.trim()

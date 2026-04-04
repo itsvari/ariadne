@@ -42,6 +42,17 @@ export default function AriadneControlPanel() {
   const audioQueueRef = useRef<Uint8Array[]>([]);
   const isAppendingRef = useRef(false);
 
+  const resumeAudioPlayback = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+
+    void audio.play().catch((err) => {
+      console.warn('Browser autoplay blocked:', err);
+    });
+  }, []);
+
   useEffect(() => {
     const saved = window.localStorage.getItem(SESSION_ID_STORAGE_KEY) ?? `session-${crypto.randomUUID()}`;
     setSessionId(saved);
@@ -106,6 +117,7 @@ export default function AriadneControlPanel() {
   // Fix: Audio context synchronously bound to user interaction
   const ensureAudioPipeline = useCallback(() => {
     if (audioRef.current && mediaSourceRef.current && sourceBufferRef.current) {
+      resumeAudioPlayback();
       return;
     }
 
@@ -115,11 +127,16 @@ export default function AriadneControlPanel() {
     const audio = new Audio(URL.createObjectURL(mediaSource));
     audioRef.current = audio;
 
-    // Trigger play synchronously on user action!
-    audio.play().catch((err) => console.warn('Browser autoplay blocked:', err));
+    // Start (or resume) playback as soon as the element exists.
+    resumeAudioPlayback();
 
     mediaSource.addEventListener('sourceopen', () => {
       if (sourceBufferRef.current) {
+        return;
+      }
+
+      if (!MediaSource.isTypeSupported('audio/mpeg')) {
+        addEvent('TTS', 'Browser does not support MediaSource audio/mpeg playback.');
         return;
       }
 
@@ -131,9 +148,10 @@ export default function AriadneControlPanel() {
         flushAudioQueue();
       });
       setAudioReady(true);
+      resumeAudioPlayback();
       flushAudioQueue();
     });
-  }, [flushAudioQueue]);
+  }, [addEvent, flushAudioQueue, resumeAudioPlayback]);
 
   const refreshDashboard = useCallback(async () => {
     if (!sessionId) {
@@ -232,6 +250,7 @@ export default function AriadneControlPanel() {
           ensureAudioPipeline();
           const payload = event.payload as { audioBase64: string };
           audioQueueRef.current.push(Uint8Array.from(atob(payload.audioBase64), (char) => char.charCodeAt(0)));
+          resumeAudioPlayback();
           flushAudioQueue();
           break;
         }
@@ -280,6 +299,7 @@ export default function AriadneControlPanel() {
       return;
     }
 
+    ensureAudioPipeline();
     setIsBusy(true);
     try {
       const response = await fetch(serverUrl('/session/start'), {
@@ -297,7 +317,7 @@ export default function AriadneControlPanel() {
     } finally {
       setIsBusy(false);
     }
-  }, [addEvent, interventionMode, refreshDashboard, sessionId, thinkerIntervalSec]);
+  }, [addEvent, ensureAudioPipeline, interventionMode, refreshDashboard, sessionId, thinkerIntervalSec]);
 
   const stopSession = useCallback(async () => {
     if (!sessionId) {
@@ -326,6 +346,7 @@ export default function AriadneControlPanel() {
         return;
       }
 
+      ensureAudioPipeline();
       await fetch(serverUrl('/utterance'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -333,7 +354,7 @@ export default function AriadneControlPanel() {
       });
       setInput('');
     },
-    [sessionId],
+    [ensureAudioPipeline, sessionId],
   );
 
   const triggerThinker = useCallback(async () => {
@@ -487,7 +508,10 @@ export default function AriadneControlPanel() {
 
             <div className="mt-4 flex flex-wrap gap-4 border-t border-[var(--border)] pt-4">
               <button
-                onClick={isRecording ? stopRecording : () => void startRecording()}
+                onClick={isRecording ? stopRecording : () => {
+                  ensureAudioPipeline();
+                  void startRecording();
+                }}
                 className={cn('btn-brutal', isRecording && 'border-[var(--danger)] text-[var(--danger)]')}
               >
                 {isRecording ? <MicOff size={16} /> : <Mic size={16} />}

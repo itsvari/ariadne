@@ -4,6 +4,16 @@ import { DeepgramTTSProvider, synthesizeSpeech } from '@ariadne/tts-client';
 
 let provider: DeepgramTTSProvider | null = null;
 
+function getTtsContentType(format?: 'mp3' | 'pcm' | 'opus'): string {
+  if (format === 'opus') {
+    return 'audio/ogg; codecs=opus';
+  }
+  if (format === 'pcm') {
+    return 'audio/L16;rate=24000;channels=1';
+  }
+  return 'audio/mpeg';
+}
+
 function getProvider(): DeepgramTTSProvider {
   if (!provider) {
     provider = new DeepgramTTSProvider();
@@ -19,7 +29,9 @@ export async function POST(request: NextRequest) {
     const stream = await synthesizeSpeech(getProvider(), ttsRequest);
 
     return new Response(stream, {
-      headers: { 'Content-Type': 'audio/mpeg' },
+      headers: {
+        'Content-Type': getTtsContentType(parsed.success ? parsed.data.format : undefined),
+      },
     });
   } catch (error) {
     console.error(error);

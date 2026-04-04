@@ -368,7 +368,7 @@ All messages are JSON with this shape:
 | `session.status` | `SessionStatus` | Session state changed (start, stop, talker/thinker status updates) |
 | `utterance.final` | `{ id, role, speakerId?, text, timestamp }` | A user utterance was finalized |
 | `speak` | `{ text }` | The Talker is speaking (text content) |
-| `tts.audio.chunk` | `{ seq, audioBase64 }` | A chunk of TTS audio (base64-encoded) |
+| `tts.audio.chunk` | `{ seq, audioBase64 }` | A chunk of TTS audio (base64-encoded MP3 bytes) |
 | `tts.audio.done` | `{ totalChunks }` | TTS audio stream completed |
 | `talker.output` | Talker result object | Full Talker turn output |
 | `reasoner.complete` | `{ reason, directiveCount, updatedBeliefStore }` | Thinker finished a reasoning cycle |
@@ -499,6 +499,8 @@ Streams microphone PCM chunks over the existing WebSocket connection.
   }
 }
 ```
+
+The server forwards `sampleRateHz` and `channels` to Deepgram transcription, so Unity clients should send accurate values that match the encoded PCM.
 
 #### `client.audio.commit`
 

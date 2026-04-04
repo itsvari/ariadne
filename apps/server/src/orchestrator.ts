@@ -349,7 +349,10 @@ export class AriadneOrchestrator {
             await this.beliefStore.appendHistory(sessionId, utterance);
             this.broadcast(sessionId, 'speak', { text: spokenText });
 
-            const audio = await synthesizeSpeech(this.ttsProvider, { text: spokenText });
+            const audio = await synthesizeSpeech(this.ttsProvider, {
+              text: spokenText,
+              format: 'mp3',
+            });
             const reader = audio.getReader();
             let sequence = 0;
 
