@@ -154,6 +154,8 @@ Returns the server's health status and which providers are configured.
 
 Creates a new session with a server-generated UUID.
 
+If a session with the same `sessionId` already has data in Valkey, the server now archives that previous snapshot and starts with a fresh belief store/history/directive state.
+
 **Request body:**
 
 ```json
@@ -334,6 +336,32 @@ Returns pending and fulfilled directives for a session.
 }
 ```
 
+#### `GET /belief-store/archives?sessionId=<id>`
+
+Lists archived snapshots for that session (newest first).
+
+**Response:**
+
+```json
+{
+  "sessionId": "session-123",
+  "archives": [
+    {
+      "archiveId": "session-123:2026-04-04T11:22:33.444Z:uuid",
+      "sessionId": "session-123",
+      "archivedAt": "2026-04-04T11:22:33.444Z",
+      "utteranceCount": 42,
+      "pendingDirectiveCount": 2,
+      "fulfilledDirectiveCount": 7
+    }
+  ]
+}
+```
+
+#### `GET /belief-store/archive?archiveId=<id>`
+
+Returns a full archived snapshot payload for export or offline analysis.
+
 ---
 
 ## WebSocket API
@@ -368,7 +396,8 @@ All messages are JSON with this shape:
 | `session.status` | `SessionStatus` | Session state changed (start, stop, talker/thinker status updates) |
 | `utterance.final` | `{ id, role, speakerId?, text, timestamp }` | A user utterance was finalized |
 | `speak` | `{ text }` | The Talker is speaking (text content) |
-| `tts.audio.chunk` | `{ seq, audioBase64 }` | A chunk of TTS audio (base64-encoded MP3 bytes) |
+| `tts.audio.start` | `{ encoding, sampleRateHz, channels }` | Metadata for the upcoming TTS stream (`linear16`, 24000Hz, mono by default) |
+| `tts.audio.chunk` | `{ seq, encoding, sampleRateHz, channels, audioBase64 }` | A chunk of TTS audio (base64-encoded raw PCM linear16 bytes by default) |
 | `tts.audio.done` | `{ totalChunks }` | TTS audio stream completed |
 | `talker.output` | Talker result object | Full Talker turn output |
 | `reasoner.complete` | `{ reason, directiveCount, updatedBeliefStore }` | Thinker finished a reasoning cycle |

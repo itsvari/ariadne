@@ -3,14 +3,14 @@ import type { TTSProvider, TTSRequest } from '@ariadne/shared-contracts';
 
 const DEEPGRAM_WS_URL = 'wss://api.deepgram.com/v1/speak';
 
-function resolveDeepgramEncoding(format?: string): 'mp3' | 'opus' | 'linear16' {
-  if (format === 'opus') {
-    return 'opus';
+function resolveDeepgramEncoding(format?: string): 'linear16' | 'mulaw' | 'alaw' {
+  if (format === 'mulaw') {
+    return 'mulaw';
   }
-  if (format === 'pcm') {
-    return 'linear16';
+  if (format === 'alaw') {
+    return 'alaw';
   }
-  return 'mp3';
+  return 'linear16';
 }
 
 export class DeepgramTTSProvider implements TTSProvider {
@@ -55,6 +55,23 @@ export class DeepgramTTSProvider implements TTSProvider {
             headers: { Authorization: `Token ${apiKey}` },
           });
 
+          socket.on('unexpected-response', (_req, response) => {
+            const chunks: Buffer[] = [];
+            response.on('data', (chunk) => {
+              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            });
+            response.on('end', () => {
+              const responseBody = Buffer.concat(chunks).toString('utf8');
+              const details = responseBody
+                ? `${response.statusCode ?? 'unknown'} ${response.statusMessage ?? ''} - ${responseBody}`
+                : `${response.statusCode ?? 'unknown'} ${response.statusMessage ?? ''}`;
+              const error = new Error(`Deepgram TTS websocket handshake failed: ${details}`);
+              console.error(error.message);
+              controller.error(error);
+              closeStream();
+            });
+          });
+
           socket.on('open', () => {
             socket.send(
               JSON.stringify({
@@ -65,29 +82,52 @@ export class DeepgramTTSProvider implements TTSProvider {
             socket.send(JSON.stringify({ type: 'Flush' }));
           });
 
-          socket.on('message', (data: WebSocket.Data) => {
-            if (Buffer.isBuffer(data)) {
-              controller.enqueue(new Uint8Array(data));
-            } else if (typeof data === 'string') {
-              try {
-                const message = JSON.parse(data) as { type?: string; err_msg?: string };
-
-                if (message.type === 'Error') {
-                  controller.error(new Error(message.err_msg ?? 'Deepgram error'));
-                  socket.close();
-                } else if (message.type === 'Flushed') {
-                  socket.send(JSON.stringify({ type: 'Close' }));
-                } else if (message.type === 'Close') {
-                  closeStream();
-                  socket.close();
+          socket.on('message', (data: WebSocket.Data, isBinary: boolean) => {
+            if (isBinary) {
+              if (Buffer.isBuffer(data)) {
+                controller.enqueue(new Uint8Array(data));
+              } else if (data instanceof ArrayBuffer) {
+                controller.enqueue(new Uint8Array(data));
+              } else if (Array.isArray(data)) {
+                const merged = Buffer.concat(data.filter((chunk): chunk is Buffer => Buffer.isBuffer(chunk)));
+                if (merged.length > 0) {
+                  controller.enqueue(new Uint8Array(merged));
                 }
-              } catch {
-                // no-op
               }
+              return;
+            }
+
+            const text = typeof data === 'string'
+              ? data
+              : Buffer.isBuffer(data)
+                ? data.toString('utf8')
+                : data instanceof ArrayBuffer
+                  ? Buffer.from(data).toString('utf8')
+                  : '';
+
+            if (!text) {
+              return;
+            }
+
+            try {
+              const message = JSON.parse(text) as { type?: string; err_msg?: string };
+
+              if (message.type === 'Error') {
+                controller.error(new Error(message.err_msg ?? 'Deepgram error'));
+                socket.close();
+              } else if (message.type === 'Flushed') {
+                socket.send(JSON.stringify({ type: 'Close' }));
+              } else if (message.type === 'Close') {
+                closeStream();
+                socket.close();
+              }
+            } catch {
+              // no-op
             }
           });
 
           socket.on('error', (error) => {
+            console.error('Deepgram TTS websocket error:', error);
             controller.error(error);
             closeStream();
           });

@@ -10,7 +10,6 @@ import {
   type ClientAudioChunkPayload,
   type ClientAudioCommitPayload,
   ClientWsMessageSchema,
-  createEmptyBeliefStore,
   utteranceToChatMessage,
   type ChatProvider,
   type ClientHelloPayload,
@@ -23,7 +22,7 @@ import {
 } from '@ariadne/shared-contracts';
 import { runTalkerTurn } from '@ariadne/talker';
 import { runThinkerTurn, startThinkerScheduler, type ThinkerSchedulerControls } from '@ariadne/thinker';
-import { DeepgramTTSProvider, synthesizeSpeech } from '@ariadne/tts-client';
+import { DeepgramTTSProvider } from '@ariadne/tts-client';
 
 export interface SessionStatus {
   sessionId: string;
@@ -142,10 +141,7 @@ export class AriadneOrchestrator {
 
     this.sessions.set(sessionId, session);
 
-    const existingBeliefs = await this.beliefStore.readBeliefStore(sessionId);
-    if (!existingBeliefs.updatedAt) {
-      await this.beliefStore.writeBeliefStore(sessionId, createEmptyBeliefStore());
-    }
+    await this.beliefStore.resetSessionForNewRun(sessionId);
 
     this.broadcast(sessionId, 'session.status', this.getSessionStatus(sessionId));
     return this.getSessionStatus(sessionId);
@@ -349,9 +345,19 @@ export class AriadneOrchestrator {
             await this.beliefStore.appendHistory(sessionId, utterance);
             this.broadcast(sessionId, 'speak', { text: spokenText });
 
-            const audio = await synthesizeSpeech(this.ttsProvider, {
-              text: spokenText,
-              format: 'mp3',
+            const ttsEncoding = 'linear16';
+            const ttsSampleRateHz = 24000;
+            const ttsChannels = 1;
+
+            this.broadcast(sessionId, 'tts.audio.start', {
+              encoding: ttsEncoding,
+              sampleRateHz: ttsSampleRateHz,
+              channels: ttsChannels,
+            });
+
+            const audio = await this.ttsProvider.synthesize(spokenText, {
+              format: 'pcm',
+              sampleRate: ttsSampleRateHz,
             });
             const reader = audio.getReader();
             let sequence = 0;
@@ -364,6 +370,9 @@ export class AriadneOrchestrator {
 
               this.broadcast(sessionId, 'tts.audio.chunk', {
                 seq: sequence,
+                encoding: ttsEncoding,
+                sampleRateHz: ttsSampleRateHz,
+                channels: ttsChannels,
                 audioBase64: Buffer.from(value).toString('base64'),
               });
               sequence += 1;
@@ -421,6 +430,7 @@ export class AriadneOrchestrator {
 
       this.broadcast(sessionId, 'talker.output', result);
     } catch (error) {
+      console.error(`[talker] session ${sessionId} failed:`, error);
       this.broadcast(sessionId, 'error', {
         message: error instanceof Error ? error.message : 'Talker invocation failed',
       });

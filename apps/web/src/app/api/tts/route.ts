@@ -5,13 +5,13 @@ import { DeepgramTTSProvider, synthesizeSpeech } from '@ariadne/tts-client';
 let provider: DeepgramTTSProvider | null = null;
 
 function getTtsContentType(format?: 'mp3' | 'pcm' | 'opus'): string {
+  if (format === 'mp3') {
+    return 'audio/mpeg';
+  }
   if (format === 'opus') {
     return 'audio/ogg; codecs=opus';
   }
-  if (format === 'pcm') {
-    return 'audio/L16;rate=24000;channels=1';
-  }
-  return 'audio/mpeg';
+  return 'audio/L16;rate=24000;channels=1';
 }
 
 function getProvider(): DeepgramTTSProvider {

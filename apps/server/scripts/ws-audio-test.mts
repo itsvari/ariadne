@@ -5,7 +5,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const OUTPUT_FILE = join(__dirname, 'test-output.mp3');
+const OUTPUT_FILE = join(__dirname, 'test-output.wav');
 
 const GATEWAY_URL = process.env.WS_URL ?? 'ws://localhost:8081';
 const SESSION_ID = 'audio-test-' + Date.now();
@@ -25,6 +25,8 @@ console.log(`Connecting to ${GATEWAY_URL}?sessionId=${SESSION_ID}&mode=${MODE}`)
 const ws = new WebSocket(`${GATEWAY_URL}?sessionId=${SESSION_ID}&mode=${MODE}`);
 
 const audioChunks: Buffer[] = [];
+let ttsSampleRateHz = 24000;
+let ttsChannels = 1;
 let ttsStarted = false;
 let finishRequested = false;
 let ttsIdleTimer: NodeJS.Timeout | null = null;
@@ -59,6 +61,29 @@ function closeSession(exitCode = 0) {
   }
 }
 
+function createWavHeader(dataLength: number, sampleRateHz: number, channels: number): Buffer {
+  const bitsPerSample = 16;
+  const blockAlign = channels * (bitsPerSample / 8);
+  const byteRate = sampleRateHz * blockAlign;
+  const header = Buffer.alloc(44);
+
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataLength, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRateHz, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataLength, 40);
+
+  return header;
+}
+
 ws.on('open', () => {
   console.log('Connected. Sending test message...');
   console.log(`  "${TEST_MESSAGE.payload.text}"`);
@@ -69,6 +94,13 @@ ws.on('message', (data) => {
   const msg = JSON.parse(data.toString());
 
   switch (msg.type) {
+    case 'tts.audio.start': {
+      ttsSampleRateHz = Number(msg.payload?.sampleRateHz ?? 24000);
+      ttsChannels = Number(msg.payload?.channels ?? 1);
+      console.log(`\nTTS stream metadata: linear16 ${ttsSampleRateHz}Hz ${ttsChannels}ch`);
+      break;
+    }
+
     case 'talker.output': {
       const calls = msg.payload?.tool_calls;
       if (Array.isArray(calls)) {
@@ -144,8 +176,9 @@ ws.on('close', () => {
   }
 
   const combined = Buffer.concat(audioChunks);
-  writeFileSync(OUTPUT_FILE, combined);
-  console.log(`\n\nSaved ${combined.length} bytes to ${OUTPUT_FILE}`);
+  const wavBuffer = Buffer.concat([createWavHeader(combined.length, ttsSampleRateHz, ttsChannels), combined]);
+  writeFileSync(OUTPUT_FILE, wavBuffer);
+  console.log(`\n\nSaved ${wavBuffer.length} bytes to ${OUTPUT_FILE}`);
 
   console.log('Playing audio...\n');
   try {

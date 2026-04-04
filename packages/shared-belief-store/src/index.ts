@@ -14,6 +14,27 @@ import {
 
 const DEFAULT_VALKEY_URL = 'valkey://localhost:6379';
 
+export interface SessionArchiveSnapshot {
+  archiveId: string;
+  sessionId: string;
+  archivedAt: string;
+  beliefStore: BeliefStore;
+  directives: Directive[];
+  fulfilledDirectives: Directive[];
+  history: Utterance[];
+  historySummary: string | null;
+  worldState: WorldState | null;
+}
+
+export interface SessionArchiveSummary {
+  archiveId: string;
+  sessionId: string;
+  archivedAt: string;
+  utteranceCount: number;
+  pendingDirectiveCount: number;
+  fulfilledDirectiveCount: number;
+}
+
 export class SharedBeliefStore {
   private valkey: Valkey;
 
@@ -142,6 +163,53 @@ export class SharedBeliefStore {
     );
   }
 
+  async resetSessionForNewRun(sessionId: string): Promise<{ archiveId: string | null }> {
+    await this.ensureConnected();
+
+    const archiveId = await this.archiveSession(sessionId);
+    await this.clearSession(sessionId);
+    await this.writeBeliefStore(sessionId, createEmptyBeliefStore());
+
+    return { archiveId };
+  }
+
+  async listSessionArchives(sessionId: string): Promise<SessionArchiveSummary[]> {
+    await this.ensureConnected();
+    const archiveIds = await this.valkey.lrange(this.archivesBySessionKey(sessionId), 0, -1);
+    if (!archiveIds.length) {
+      return [];
+    }
+
+    const records = await Promise.all(
+      archiveIds.map(async (archiveId: string) => {
+        const raw = await this.valkey.get(this.archiveKey(archiveId));
+        if (!raw) {
+          return null;
+        }
+        const parsed = this.parseArchive(raw);
+        return {
+          archiveId: parsed.archiveId,
+          sessionId: parsed.sessionId,
+          archivedAt: parsed.archivedAt,
+          utteranceCount: parsed.history.length,
+          pendingDirectiveCount: parsed.directives.length,
+          fulfilledDirectiveCount: parsed.fulfilledDirectives.length,
+        } satisfies SessionArchiveSummary;
+      }),
+    );
+
+    return records.filter((record): record is SessionArchiveSummary => Boolean(record)).reverse();
+  }
+
+  async readSessionArchive(archiveId: string): Promise<SessionArchiveSnapshot | null> {
+    await this.ensureConnected();
+    const raw = await this.valkey.get(this.archiveKey(archiveId));
+    if (!raw) {
+      return null;
+    }
+    return this.parseArchive(raw);
+  }
+
   async disconnect(): Promise<void> {
     await this.valkey.quit();
   }
@@ -150,6 +218,67 @@ export class SharedBeliefStore {
     if (this.valkey.status === 'wait') {
       await this.valkey.connect();
     }
+  }
+
+  private async archiveSession(sessionId: string): Promise<string | null> {
+    const [beliefRaw, directivesRaw, fulfilledRaw, historyRaw, historySummary, worldRaw] = await Promise.all([
+      this.valkey.get(this.beliefKey(sessionId)),
+      this.valkey.lrange(this.directivesKey(sessionId), 0, -1),
+      this.valkey.lrange(this.fulfilledKey(sessionId), 0, -1),
+      this.valkey.lrange(this.historyKey(sessionId), 0, -1),
+      this.valkey.get(this.historySummaryKey(sessionId)),
+      this.valkey.get(this.worldKey(sessionId)),
+    ]);
+
+    const hasData = Boolean(beliefRaw)
+      || directivesRaw.length > 0
+      || fulfilledRaw.length > 0
+      || historyRaw.length > 0
+      || Boolean(historySummary)
+      || Boolean(worldRaw);
+
+    if (!hasData) {
+      return null;
+    }
+
+    const archivedAt = new Date().toISOString();
+    const archiveId = `${sessionId}:${archivedAt}:${crypto.randomUUID()}`;
+
+    const snapshot: SessionArchiveSnapshot = {
+      archiveId,
+      sessionId,
+      archivedAt,
+      beliefStore: beliefRaw
+        ? BeliefStoreSchema.parse(JSON.parse(beliefRaw))
+        : createEmptyBeliefStore(),
+      directives: directivesRaw.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry))),
+      fulfilledDirectives: fulfilledRaw.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry))),
+      history: historyRaw.map((entry: string) => UtteranceSchema.parse(JSON.parse(entry))),
+      historySummary: historySummary || null,
+      worldState: worldRaw ? WorldStateSchema.parse(JSON.parse(worldRaw)) : null,
+    };
+
+    await this.valkey.multi()
+      .set(this.archiveKey(archiveId), JSON.stringify(snapshot))
+      .rpush(this.archivesBySessionKey(sessionId), archiveId)
+      .exec();
+
+    return archiveId;
+  }
+
+  private parseArchive(raw: string): SessionArchiveSnapshot {
+    const parsed = JSON.parse(raw) as SessionArchiveSnapshot;
+    return {
+      archiveId: String(parsed.archiveId),
+      sessionId: String(parsed.sessionId),
+      archivedAt: String(parsed.archivedAt),
+      beliefStore: BeliefStoreSchema.parse(parsed.beliefStore),
+      directives: (parsed.directives ?? []).map((entry) => DirectiveSchema.parse(entry)),
+      fulfilledDirectives: (parsed.fulfilledDirectives ?? []).map((entry) => DirectiveSchema.parse(entry)),
+      history: (parsed.history ?? []).map((entry) => UtteranceSchema.parse(entry)),
+      historySummary: parsed.historySummary ?? null,
+      worldState: parsed.worldState ? WorldStateSchema.parse(parsed.worldState) : null,
+    };
   }
 
   private beliefKey(sessionId: string): string {
@@ -174,5 +303,13 @@ export class SharedBeliefStore {
 
   private worldKey(sessionId: string): string {
     return `world:${sessionId}`;
+  }
+
+  private archiveKey(archiveId: string): string {
+    return `archive:${archiveId}`;
+  }
+
+  private archivesBySessionKey(sessionId: string): string {
+    return `archives:${sessionId}`;
   }
 }

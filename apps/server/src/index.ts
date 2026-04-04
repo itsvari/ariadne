@@ -202,18 +202,71 @@ async function bootstrap(): Promise<void> {
     }
   });
 
+  app.get('/belief-store/archives', async (req, res) => {
+    try {
+      const sessionId = String(req.query.sessionId ?? '');
+      if (!sessionId) {
+        res.status(400).json({ error: 'sessionId is required' });
+        return;
+      }
+
+      res.json({
+        sessionId,
+        archives: await beliefStore.listSessionArchives(sessionId),
+      });
+    } catch (error) {
+      res.status(500).json({ error: toErrorMessage(error) });
+    }
+  });
+
+  app.get('/belief-store/archive', async (req, res) => {
+    try {
+      const archiveId = String(req.query.archiveId ?? '');
+      if (!archiveId) {
+        res.status(400).json({ error: 'archiveId is required' });
+        return;
+      }
+
+      const archive = await beliefStore.readSessionArchive(archiveId);
+      if (!archive) {
+        res.status(404).json({ error: 'Archive not found' });
+        return;
+      }
+
+      res.json({ archive });
+    } catch (error) {
+      res.status(500).json({ error: toErrorMessage(error) });
+    }
+  });
+
   const closeDiscoveryResponder = startDiscoveryResponder(PORT);
 
   server.listen(PORT, () => {
     console.log(`Ariadne server listening on http://localhost:${PORT}`);
   });
 
-  const shutdown = (): void => {
+  let shutdownInProgress = false;
+  const shutdown = async (): Promise<void> => {
+    if (shutdownInProgress) {
+      return;
+    }
+    shutdownInProgress = true;
+
     closeDiscoveryResponder();
+
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+
+    await beliefStore.disconnect();
   };
 
-  process.once('SIGINT', shutdown);
-  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', () => {
+    void shutdown();
+  });
+  process.once('SIGTERM', () => {
+    void shutdown();
+  });
 }
 
 function toErrorMessage(error: unknown): string {

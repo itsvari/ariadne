@@ -36,20 +36,22 @@ export default function AriadneControlPanel() {
   
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const eventsEndRef = useRef<HTMLDivElement | null>(null);
-  const mediaSourceRef = useRef<MediaSource | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const sourceBufferRef = useRef<SourceBuffer | null>(null);
-  const audioQueueRef = useRef<Uint8Array[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const nextPlaybackTimeRef = useRef(0);
+  const ttsEncodingRef = useRef('linear16');
+  const ttsSampleRateRef = useRef(24000);
+  const ttsChannelsRef = useRef(1);
+  const audioQueueRef = useRef<Array<{ data: Uint8Array; sampleRateHz: number; channels: number }>>([]);
   const isAppendingRef = useRef(false);
 
   const resumeAudioPlayback = useCallback(() => {
-    const audio = audioRef.current;
-    if (!audio) {
+    const audioContext = audioContextRef.current;
+    if (!audioContext) {
       return;
     }
 
-    void audio.play().catch((err) => {
-      console.warn('Browser autoplay blocked:', err);
+    void audioContext.resume().catch((err) => {
+      console.warn('Audio context resume blocked:', err);
     });
   }, []);
 
@@ -94,64 +96,104 @@ export default function AriadneControlPanel() {
   }, []);
 
   const flushAudioQueue = useCallback(() => {
-    const sourceBuffer = sourceBufferRef.current;
-    if (!sourceBuffer || sourceBuffer.updating || isAppendingRef.current) {
-      return;
-    }
-
-    const nextChunk = audioQueueRef.current.shift();
-    if (!nextChunk) {
+    const audioContext = audioContextRef.current;
+    if (!audioContext || isAppendingRef.current) {
       return;
     }
 
     isAppendingRef.current = true;
-    const chunk = nextChunk.slice();
+
     try {
-      sourceBuffer.appendBuffer(chunk);
+      while (audioQueueRef.current.length > 0) {
+        const queuedChunk = audioQueueRef.current.shift();
+        if (!queuedChunk || queuedChunk.data.byteLength < 2) {
+          continue;
+        }
+
+        const { data: chunk, sampleRateHz, channels } = queuedChunk;
+        if (channels < 1 || channels > 2) {
+          addEvent('TTS', `Unsupported channel count: ${channels}`);
+          continue;
+        }
+
+        const totalSampleCount = Math.floor(chunk.byteLength / 2);
+        const frameCount = Math.floor(totalSampleCount / channels);
+        if (frameCount <= 0) {
+          continue;
+        }
+
+        const audioBuffer = audioContext.createBuffer(channels, frameCount, sampleRateHz);
+        const channelData = Array.from({ length: channels }, (_, index) => audioBuffer.getChannelData(index));
+
+        for (let frame = 0; frame < frameCount; frame += 1) {
+          for (let channel = 0; channel < channels; channel += 1) {
+            const sampleIndex = frame * channels + channel;
+            const byteIndex = sampleIndex * 2;
+            const low = chunk[byteIndex];
+            const high = chunk[byteIndex + 1];
+            let sample = (high << 8) | low;
+            if (sample >= 0x8000) {
+              sample -= 0x10000;
+            }
+            channelData[channel][frame] = sample / 0x8000;
+          }
+        }
+
+        if (ttsEncodingRef.current !== 'linear16') {
+          addEvent('TTS', `Unsupported encoding in web player: ${ttsEncodingRef.current}`);
+          continue;
+        }
+
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+
+        const now = audioContext.currentTime;
+        const startAt = Math.max(now, nextPlaybackTimeRef.current);
+        source.start(startAt);
+        nextPlaybackTimeRef.current = startAt + audioBuffer.duration;
+      }
     } catch (e) {
-      console.error("Failed to append buffer", e);
+      console.error('Failed to process PCM TTS chunk', e);
+      addEvent('TTS', `PCM playback error: ${e instanceof Error ? e.message : 'unknown'}`);
+    } finally {
       isAppendingRef.current = false;
     }
-  }, []);
+  }, [addEvent]);
 
   // Fix: Audio context synchronously bound to user interaction
   const ensureAudioPipeline = useCallback(() => {
-    if (audioRef.current && mediaSourceRef.current && sourceBufferRef.current) {
+    if (audioContextRef.current) {
       resumeAudioPlayback();
       return;
     }
 
-    const mediaSource = new MediaSource();
-    mediaSourceRef.current = mediaSource;
+    const AudioContextCtor = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) {
+      addEvent('TTS', 'WebAudio is not supported in this browser.');
+      return;
+    }
 
-    const audio = new Audio(URL.createObjectURL(mediaSource));
-    audioRef.current = audio;
+    const audioContext = new AudioContextCtor();
+    audioContextRef.current = audioContext;
+    nextPlaybackTimeRef.current = audioContext.currentTime;
+    setAudioReady(true);
 
-    // Start (or resume) playback as soon as the element exists.
     resumeAudioPlayback();
-
-    mediaSource.addEventListener('sourceopen', () => {
-      if (sourceBufferRef.current) {
-        return;
-      }
-
-      if (!MediaSource.isTypeSupported('audio/mpeg')) {
-        addEvent('TTS', 'Browser does not support MediaSource audio/mpeg playback.');
-        return;
-      }
-
-      const sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
-      sourceBuffer.mode = 'sequence';
-      sourceBufferRef.current = sourceBuffer;
-      sourceBuffer.addEventListener('updateend', () => {
-        isAppendingRef.current = false;
-        flushAudioQueue();
-      });
-      setAudioReady(true);
-      resumeAudioPlayback();
-      flushAudioQueue();
-    });
+    flushAudioQueue();
   }, [addEvent, flushAudioQueue, resumeAudioPlayback]);
+
+  useEffect(() => {
+    return () => {
+      const audioContext = audioContextRef.current;
+      if (!audioContext) {
+        return;
+      }
+
+      void audioContext.close();
+      audioContextRef.current = null;
+    };
+  }, []);
 
   const refreshDashboard = useCallback(async () => {
     if (!sessionId) {
@@ -246,10 +288,29 @@ export default function AriadneControlPanel() {
         case 'speak':
           addEvent('Speak', String((event.payload as { text?: string }).text ?? ''));
           break;
+        case 'tts.audio.start': {
+          const payload = event.payload as { encoding?: string; sampleRateHz?: number; channels?: number };
+          ttsEncodingRef.current = payload.encoding ?? 'linear16';
+          ttsSampleRateRef.current = payload.sampleRateHz ?? 24000;
+          ttsChannelsRef.current = payload.channels ?? 1;
+          addEvent(
+            'TTS',
+            `Audio start: ${ttsEncodingRef.current} ${ttsSampleRateRef.current}Hz ${ttsChannelsRef.current}ch`,
+          );
+          break;
+        }
         case 'tts.audio.chunk': {
           ensureAudioPipeline();
-          const payload = event.payload as { audioBase64: string };
-          audioQueueRef.current.push(Uint8Array.from(atob(payload.audioBase64), (char) => char.charCodeAt(0)));
+          const payload = event.payload as {
+            audioBase64: string;
+            sampleRateHz?: number;
+            channels?: number;
+          };
+          audioQueueRef.current.push({
+            data: Uint8Array.from(atob(payload.audioBase64), (char) => char.charCodeAt(0)),
+            sampleRateHz: payload.sampleRateHz ?? ttsSampleRateRef.current,
+            channels: payload.channels ?? ttsChannelsRef.current,
+          });
           resumeAudioPlayback();
           flushAudioQueue();
           break;
@@ -277,10 +338,24 @@ export default function AriadneControlPanel() {
       handleSessionEvent(message);
     };
 
+    socket.onerror = (event) => {
+      const details = event instanceof ErrorEvent ? event.message : 'WebSocket error event';
+      addEvent('SocketError', details);
+      console.error('[events websocket] error:', event);
+    };
+
+    socket.onclose = (event) => {
+      if (event.code !== 1000) {
+        const details = `Closed (${event.code}) ${event.reason || 'no reason provided'}`;
+        addEvent('SocketClosed', details);
+        console.warn('[events websocket] closed:', details);
+      }
+    };
+
     return () => {
       socket.close();
     };
-  }, [handleSessionEvent, refreshDashboard, sessionId]);
+  }, [addEvent, handleSessionEvent, refreshDashboard, sessionId]);
 
   useEffect(() => {
     if (!status?.active) {
