@@ -1,4 +1,6 @@
 import type { Server as HttpServer } from 'http';
+import { createWriteStream, mkdirSync, type WriteStream } from 'fs';
+import { dirname, resolve } from 'path';
 import WebSocket, { WebSocketServer } from 'ws';
 import { EventBus } from '@ariadne/event-bus';
 import {
@@ -82,6 +84,16 @@ export class AriadneOrchestrator {
   private thinkerProvider: ChatProvider;
   private ttsProvider: DeepgramTTSProvider;
   private transcribeAudio?: AriadneOrchestratorOptions['transcribeAudio'];
+  private readonly logSystemEvents = (process.env.LOG_SYSTEM_EVENTS ?? 'true').toLowerCase() !== 'false';
+  private readonly logSystemEventsToFile = (process.env.LOG_SYSTEM_EVENTS_TO_FILE ?? 'true').toLowerCase() !== 'false';
+  private readonly systemEventsLogFilePath = process.env.LOG_SYSTEM_EVENTS_FILE?.trim() || 'logs/system-events.ndjson';
+  private readonly talkerHistoryTurns = this.parsePositiveInteger(process.env.TALKER_CONTEXT_TURNS, 10);
+  private systemEventsLogStream?: WriteStream;
+
+  private static readonly SUPPRESSED_LOG_EVENT_TYPES = new Set([
+    'tts.audio.chunk',
+    'client.audio.chunk',
+  ]);
 
   private static readonly MAX_BUFFERED_AUDIO_BYTES = 2_000_000;
 
@@ -91,6 +103,7 @@ export class AriadneOrchestrator {
     this.thinkerProvider = options.thinkerProvider ?? new OpenRouterChatProvider();
     this.ttsProvider = options.ttsProvider ?? new DeepgramTTSProvider();
     this.transcribeAudio = options.transcribeAudio;
+    this.systemEventsLogStream = this.createSystemEventsLogStream();
 
     this.wsServer = new WebSocketServer({ noServer: true });
     options.httpServer.on('upgrade', (request, socket, head) => {
@@ -231,6 +244,7 @@ export class AriadneOrchestrator {
     session.thinkerStatus = 'running';
     session.lastActivityAt = new Date().toISOString();
     this.broadcast(sessionId, 'session.status', this.serializeSession(session));
+    const thinkerRunStartedAtIso = new Date().toISOString();
 
     session.thinkerRunInFlight = (async () => {
       try {
@@ -244,7 +258,7 @@ export class AriadneOrchestrator {
           fullHistory: history,
           worldState,
           currentBeliefStore,
-          model: process.env.OPENROUTER_THINKER_MODEL ?? 'openrouter/hunter-alpha',
+          model: process.env.OPENROUTER_THINKER_MODEL ?? 'qwen/qwen3.6-plus:free',
           toolRuntime: {
             write_belief_store: async ({ store }) => {
               const nextStore = store ?? currentBeliefStore;
@@ -296,6 +310,45 @@ export class AriadneOrchestrator {
           updatedBeliefStore: result.updatedBeliefStore,
         });
         this.broadcast(sessionId, 'session.status', this.serializeSession(session));
+
+        if (session.active && session.talkerStatus === 'idle' && result.directives.length > 0) {
+          const latestHistory = await this.beliefStore.getHistory(sessionId, 4);
+          const latestUserUtterance = [...latestHistory]
+            .reverse()
+            .find((entry) => entry.role === 'user');
+
+          const conversationMovedOn = Boolean(
+            latestUserUtterance
+              && Date.parse(latestUserUtterance.timestamp) > Date.parse(thinkerRunStartedAtIso),
+          );
+
+          if (conversationMovedOn) {
+            this.broadcast(sessionId, 'telemetry', {
+              type: 'reasoner.skip_talker_stale_directives',
+              sessionId,
+              directiveCount: result.directives.length,
+              reason,
+              thinkerRunStartedAt: thinkerRunStartedAtIso,
+              latestUserUtteranceAt: latestUserUtterance?.timestamp,
+            });
+          } else {
+            this.broadcast(sessionId, 'telemetry', {
+              type: 'reasoner.trigger_talker',
+              sessionId,
+              directiveCount: result.directives.length,
+              reason,
+            });
+            await this.invokeTalker(sessionId);
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Thinker invocation failed';
+        console.error(`[thinker] session ${sessionId} failed:`, error);
+        session.thinkerStatus = session.active ? 'scheduled' : 'idle';
+        session.lastActivityAt = new Date().toISOString();
+        this.broadcast(sessionId, 'error', { message });
+        this.broadcast(sessionId, 'session.status', this.serializeSession(session));
+        throw error;
       } finally {
         session.thinkerRunInFlight = undefined;
       }
@@ -311,7 +364,8 @@ export class AriadneOrchestrator {
     this.broadcast(sessionId, 'session.status', this.serializeSession(session));
 
     try {
-      const history = await this.beliefStore.getHistory(sessionId, 12);
+      // A conversational turn is roughly user+assistant, so fetch 2x utterances.
+      const history = await this.beliefStore.getHistory(sessionId, this.talkerHistoryTurns * 2);
       const beliefSnapshot = await this.beliefStore.readBeliefStore(sessionId);
       const directives = await this.beliefStore.getDirectives(sessionId);
       const worldState = await this.beliefStore.getWorldState(sessionId);
@@ -331,55 +385,7 @@ export class AriadneOrchestrator {
         model: process.env.CEREBRAS_TALKER_MODEL ?? 'gpt-oss-120b',
         toolRuntime: {
           speak: async ({ text }) => {
-            const spokenText = text?.trim() ?? '';
-            if (!spokenText) {
-              return { spoken: false };
-            }
-
-            const utterance: Utterance = {
-              id: crypto.randomUUID(),
-              role: 'assistant',
-              text: spokenText,
-              timestamp: new Date().toISOString(),
-            };
-            await this.beliefStore.appendHistory(sessionId, utterance);
-            this.broadcast(sessionId, 'speak', { text: spokenText });
-
-            const ttsEncoding = 'linear16';
-            const ttsSampleRateHz = 24000;
-            const ttsChannels = 1;
-
-            this.broadcast(sessionId, 'tts.audio.start', {
-              encoding: ttsEncoding,
-              sampleRateHz: ttsSampleRateHz,
-              channels: ttsChannels,
-            });
-
-            const audio = await this.ttsProvider.synthesize(spokenText, {
-              format: 'pcm',
-              sampleRate: ttsSampleRateHz,
-            });
-            const reader = audio.getReader();
-            let sequence = 0;
-
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) {
-                break;
-              }
-
-              this.broadcast(sessionId, 'tts.audio.chunk', {
-                seq: sequence,
-                encoding: ttsEncoding,
-                sampleRateHz: ttsSampleRateHz,
-                channels: ttsChannels,
-                audioBase64: Buffer.from(value).toString('base64'),
-              });
-              sequence += 1;
-            }
-
-            this.broadcast(sessionId, 'tts.audio.done', { totalChunks: sequence });
-            return { spoken: true, text: spokenText };
+            return this.emitSpokenResponse(sessionId, text?.trim() ?? '');
           },
           avatar_command: async (args) => {
             await this.bus.publish({
@@ -398,7 +404,11 @@ export class AriadneOrchestrator {
               timestamp: new Date().toISOString(),
               payload: { reason: reason ?? 'Talker requested help' },
             });
-            void this.triggerThinker(sessionId, reason ?? 'talker_trigger');
+            void this.triggerThinker(sessionId, reason ?? 'talker_trigger').catch((error: unknown) => {
+              const message = error instanceof Error ? error.message : 'Thinker invocation failed';
+              console.error(`[thinker] background trigger failed for session ${sessionId}:`, error);
+              this.broadcast(sessionId, 'error', { message });
+            });
             return { triggered: true };
           },
           wait_for_reasoner: async ({ reason }) => {
@@ -418,7 +428,25 @@ export class AriadneOrchestrator {
         },
       });
 
-      if (result.content) {
+      const normalizedContent = result.content?.trim() ?? '';
+      const hasSpeakToolCall = Boolean(
+        result.tool_calls?.some((toolCall) => toolCall.function.name === 'speak'),
+      );
+      const looksLikeToolMarkup = /^\[[a-z_]+\s*/i.test(normalizedContent);
+      const isNoResponseSentinel = normalizedContent.toLowerCase() === '(no response)';
+      const shouldFallbackSpeak =
+        normalizedContent.length > 0 && !hasSpeakToolCall && !looksLikeToolMarkup && !isNoResponseSentinel;
+
+      if (shouldFallbackSpeak) {
+        await this.emitSpokenResponse(sessionId, normalizedContent);
+        this.broadcast(sessionId, 'telemetry', {
+          type: 'talker.fallback_speak',
+          sessionId,
+          textLength: normalizedContent.length,
+        });
+      }
+
+      if (result.content && !shouldFallbackSpeak) {
         const utterance: Utterance = {
           id: crypto.randomUUID(),
           role: 'system',
@@ -440,6 +468,74 @@ export class AriadneOrchestrator {
       session.lastActivityAt = new Date().toISOString();
       this.broadcast(sessionId, 'session.status', this.serializeSession(session));
     }
+  }
+
+  private async emitSpokenResponse(sessionId: string, spokenText: string): Promise<{ spoken: boolean; text?: string }> {
+    const normalized = this.stripMarkdownForSpeech(spokenText).trim();
+    if (!normalized) {
+      return { spoken: false };
+    }
+
+    const utterance: Utterance = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      text: normalized,
+      timestamp: new Date().toISOString(),
+    };
+    await this.beliefStore.appendHistory(sessionId, utterance);
+    this.broadcast(sessionId, 'speak', { text: normalized });
+
+    const ttsEncoding = 'linear16';
+    const ttsSampleRateHz = 24000;
+    const ttsChannels = 1;
+
+    this.broadcast(sessionId, 'tts.audio.start', {
+      encoding: ttsEncoding,
+      sampleRateHz: ttsSampleRateHz,
+      channels: ttsChannels,
+    });
+
+    const audio = await this.ttsProvider.synthesize(normalized, {
+      format: 'pcm',
+      sampleRate: ttsSampleRateHz,
+    });
+    const reader = audio.getReader();
+    let sequence = 0;
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      this.broadcast(sessionId, 'tts.audio.chunk', {
+        seq: sequence,
+        encoding: ttsEncoding,
+        sampleRateHz: ttsSampleRateHz,
+        channels: ttsChannels,
+        audioBase64: Buffer.from(value).toString('base64'),
+      });
+      sequence += 1;
+    }
+
+    this.broadcast(sessionId, 'tts.audio.done', { totalChunks: sequence });
+    return { spoken: true, text: normalized };
+  }
+
+  private stripMarkdownForSpeech(text: string): string {
+    return text
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/^\s{0,3}(#{1,6})\s+/gm, '')
+      .replace(/^\s{0,3}([-*+]|\d+\.)\s+/gm, '')
+      .replace(/(\*\*|__)(.*?)\1/g, '$2')
+      .replace(/(\*|_)(.*?)\1/g, '$2')
+      .replace(/^>\s?/gm, '')
+      .replace(/\|/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
   }
 
   private attachSocket(socket: WebSocket, sessionId: string): void {
@@ -472,7 +568,17 @@ export class AriadneOrchestrator {
     });
 
     socket.on('message', (rawData) => {
-      void this.handleSocketMessage(socket, sessionId, rawData);
+      void this.handleSocketMessage(socket, sessionId, rawData).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : 'Socket message handling failed';
+        console.error(`[events] failed to handle websocket message for session ${sessionId}:`, error);
+        this.sendSocketMessage(socket, {
+          type: 'error',
+          sessionId,
+          eventId: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          payload: { message },
+        });
+      });
     });
 
     socket.on('close', () => {
@@ -503,6 +609,7 @@ export class AriadneOrchestrator {
     try {
       message = ClientWsMessageSchema.parse(JSON.parse(rawText));
     } catch {
+      this.logClientSocketMessage(sessionId, 'client.invalid', { rawText: this.truncateForLog(rawText, 700) });
       this.sendSocketMessage(socket, {
         type: 'error',
         sessionId,
@@ -512,6 +619,8 @@ export class AriadneOrchestrator {
       });
       return;
     }
+
+    this.logClientSocketMessage(sessionId, message.type, message.payload ?? null);
 
     if (message.type === 'client.hello') {
       await this.handleClientHello(socket, sessionId, message.payload);
@@ -747,16 +856,146 @@ export class AriadneOrchestrator {
       payload,
     };
 
+    this.logEventMessage(message, session.sockets.size);
+
     session.events = [...session.events.slice(-99), message];
     for (const socket of session.sockets) {
-      this.sendSocketMessage(socket, message);
+      this.sendSocketMessage(socket, message, 'broadcast');
     }
   }
 
-  private sendSocketMessage(socket: WebSocket, message: WsMessage): void {
+  private sendSocketMessage(socket: WebSocket, message: WsMessage, context: 'broadcast' | 'direct' = 'direct'): void {
     if (socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(message));
+      this.logOutboundSocketMessage(message, context);
     }
+  }
+
+  private logEventMessage(message: WsMessage, recipients: number): void {
+    if (!this.logSystemEvents) {
+      return;
+    }
+    if (!this.shouldLogEventType(message.type)) {
+      return;
+    }
+
+    const payloadPreview = this.stringifyPayloadForLog(message.payload);
+    const logLine = `[events] ${message.type} session=${message.sessionId} recipients=${recipients} payload=${payloadPreview}`;
+    console.info(logLine);
+    this.writeLogRecord({
+      timestamp: message.timestamp,
+      channel: 'events.broadcast',
+      sessionId: message.sessionId,
+      type: message.type,
+      eventId: message.eventId,
+      recipients,
+      payload: message.payload,
+    });
+  }
+
+  private logOutboundSocketMessage(message: WsMessage, context: 'broadcast' | 'direct'): void {
+    if (!this.logSystemEvents || context !== 'direct') {
+      return;
+    }
+    if (!this.shouldLogEventType(message.type)) {
+      return;
+    }
+
+    const payloadPreview = this.stringifyPayloadForLog(message.payload);
+    console.info(
+      `[socket:out] ${message.type} session=${message.sessionId} context=${context} payload=${payloadPreview}`,
+    );
+    this.writeLogRecord({
+      timestamp: message.timestamp,
+      channel: 'socket.out',
+      context,
+      sessionId: message.sessionId,
+      type: message.type,
+      eventId: message.eventId,
+      payload: message.payload,
+    });
+  }
+
+  private logClientSocketMessage(sessionId: string, type: string, payload: unknown): void {
+    if (!this.logSystemEvents) {
+      return;
+    }
+    if (!this.shouldLogEventType(type)) {
+      return;
+    }
+
+    const payloadPreview = this.stringifyPayloadForLog(payload);
+    console.info(`[socket:in] ${type} session=${sessionId} payload=${payloadPreview}`);
+    this.writeLogRecord({
+      timestamp: new Date().toISOString(),
+      channel: 'socket.in',
+      sessionId,
+      type,
+      payload,
+    });
+  }
+
+  private stringifyPayloadForLog(payload: unknown): string {
+    try {
+      const serialized = JSON.stringify(payload);
+      if (!serialized) {
+        return 'null';
+      }
+      if (serialized.length > 700) {
+        return `${serialized.slice(0, 700)}...<truncated>`;
+      }
+      return serialized;
+    } catch {
+      return '[unserializable]';
+    }
+  }
+
+  private truncateForLog(value: string, maxLength: number): string {
+    return value.length > maxLength ? `${value.slice(0, maxLength)}...<truncated>` : value;
+  }
+
+  private shouldLogEventType(type: string): boolean {
+    return !AriadneOrchestrator.SUPPRESSED_LOG_EVENT_TYPES.has(type);
+  }
+
+  private createSystemEventsLogStream(): WriteStream | undefined {
+    if (!this.logSystemEventsToFile) {
+      return undefined;
+    }
+
+    try {
+      const absolutePath = resolve(process.cwd(), this.systemEventsLogFilePath);
+      mkdirSync(dirname(absolutePath), { recursive: true });
+      const stream = createWriteStream(absolutePath, { flags: 'a', encoding: 'utf8' });
+      stream.on('error', (error) => {
+        console.error('[events] failed to write log file:', error);
+      });
+      console.info(`[events] file logging enabled: ${absolutePath}`);
+      return stream;
+    } catch (error) {
+      console.error('[events] failed to initialize log file stream:', error);
+      return undefined;
+    }
+  }
+
+  private writeLogRecord(record: Record<string, unknown>): void {
+    if (!this.systemEventsLogStream) {
+      return;
+    }
+
+    try {
+      this.systemEventsLogStream.write(`${JSON.stringify(record)}\n`);
+    } catch {
+      // Keep runtime resilient even when file logging fails.
+    }
+  }
+
+  private parsePositiveInteger(raw: string | undefined, fallback: number): number {
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      return fallback;
+    }
+    return Math.floor(parsed);
   }
 
   private getRequiredSession(sessionId: string): SessionState {

@@ -133,7 +133,6 @@ export class SharedBeliefStore {
       conversation_summary: summary,
     });
     await this.valkey.set(this.historySummaryKey(sessionId), summary);
-    await this.valkey.ltrim(this.historyKey(sessionId), -20, -1);
   }
 
   async setWorldState(sessionId: string, state: WorldState): Promise<void> {

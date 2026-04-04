@@ -20,10 +20,16 @@ Create a `.env` file inside `apps/server/`. The dev and start scripts load it au
 
 | Variable | Required | Description |
 |---|---|---|
-| `OPENROUTER_API_KEY` | **Yes** | API key for OpenRouter. Powers the Talker (and Thinker if Cerebras is not set). The server will refuse to start without this. |
-| `CEREBRAS_API_KEY` | No | API key for Cerebras. When set, the Thinker uses Cerebras instead of OpenRouter. |
+| `OPENROUTER_API_KEY` | **Yes** | API key for OpenRouter. Powers the Thinker model in this server build. |
+| `OPENROUTER_THINKER_MODEL` | No | Override the Thinker model (default: `qwen/qwen3.6-plus:free`). |
+| `OPENROUTER_BASE_URL` | No | Override OpenRouter API base URL (default: `https://openrouter.ai/api/v1`). |
+| `CEREBRAS_API_KEY` | **Yes** | API key for Cerebras. Powers the Talker model in this server build. |
+| `CEREBRAS_TALKER_MODEL` | No | Override the Talker model (default: `gpt-oss-120b`). |
 | `DEEPGRAM_API_KEY` | **Yes** | API key for Deepgram. Powers speech-to-text (`/utterance/audio`) and text-to-speech streaming over WebSocket. |
-| `OPENROUTER_MODEL` | No | Override the default OpenRouter model (e.g. `google/gemini-2.0-flash-001`). |
+| `TALKER_CONTEXT_TURNS` | No | Number of recent conversational turns included for the Talker (default: `10`). Internally this maps to roughly `2 x turns` utterances. |
+| `LOG_SYSTEM_EVENTS` | No | Enable structured event logging to console (default: `true`). |
+| `LOG_SYSTEM_EVENTS_TO_FILE` | No | Enable NDJSON event logging to file (default: `true`). |
+| `LOG_SYSTEM_EVENTS_FILE` | No | Relative or absolute path for NDJSON event log file (default: `logs/system-events.ndjson`). |
 | `PORT` | No | HTTP port. Defaults to `8081`. |
 | `DISCOVERY_ENABLED` | No | Enable UDP LAN discovery responder. Defaults to `true`. |
 | `DISCOVERY_PORT` | No | UDP port for LAN discovery request/response. Defaults to `9876`. |
@@ -32,9 +38,15 @@ Example `.env`:
 
 ```
 OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_THINKER_MODEL=qwen/qwen3.6-plus:free
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 CEREBRAS_API_KEY=csk-...
+CEREBRAS_TALKER_MODEL=gpt-oss-120b
 DEEPGRAM_API_KEY=af9ae...
-OPENROUTER_MODEL=google/gemini-2.0-flash-001
+TALKER_CONTEXT_TURNS=10
+LOG_SYSTEM_EVENTS=true
+LOG_SYSTEM_EVENTS_TO_FILE=true
+LOG_SYSTEM_EVENTS_FILE=logs/system-events.ndjson
 DISCOVERY_ENABLED=true
 DISCOVERY_PORT=9876
 ```
@@ -64,9 +76,18 @@ On startup the server will:
 
 1. Verify `OPENROUTER_API_KEY` is present
 2. Health-check the Valkey/Redis connection
-3. Initialize the Talker, Thinker, TTS, and Deepgram providers
+3. Initialize the Talker (Cerebras), Thinker (OpenRouter), TTS, and Deepgram providers
 4. Start UDP LAN discovery responder (unless disabled)
 5. Listen on `http://localhost:8081` (or the configured `PORT`)
+
+## Runtime Behavior Notes
+
+- Talker receives recent conversational context using `TALKER_CONTEXT_TURNS` (default 10 turns).
+- Thinker reads full session history plus latest belief store and world state.
+- Talker treats thinker directives as relevance-aware guidance (not unconditional commands).
+- If thinker finishes with directives while session is idle, server may trigger a talker follow-up.
+- If a newer user utterance arrives after thinker started, stale auto-follow-up is skipped.
+- Talker output is expected to be plain spoken text; server also strips markdown-like syntax before TTS as a safety fallback.
 
 ## LAN Discovery (UDP)
 
@@ -170,7 +191,7 @@ If a session with the same `sessionId` already has data in Valkey, the server no
 }
 ```
 
-All fields inside `sessionConfig` are optional. `interventionMode` can be `"control"`, `"light"`, or `"heavy"` (defaults to `"control"`). `thinkerIntervalSec` controls how often the Thinker runs automatically (defaults to `60`, range 15–600).
+All fields inside `sessionConfig` are optional. `interventionMode` can be `"control"` or `"light"` (defaults to `"control"`). `thinkerIntervalSec` controls how often the Thinker runs automatically (defaults to `60`, range 15–600).
 
 **Response:** `SessionStatus` object (see below).
 
@@ -404,7 +425,7 @@ All messages are JSON with this shape:
 | `world_state.update` | World state object | World state was updated |
 | `avatar.command` | `{ ..., priority }` | Avatar animation/behavior command (`priority`: `"reactive"` or `"planned"`) |
 | `stt.transcript` | `{ speakerId?, text, reason }` | Transcript generated from streamed `client.audio.*` chunks |
-| `telemetry` | Telemetry event | Internal telemetry from Talker or Thinker |
+| `telemetry` | Telemetry event | Internal telemetry from Talker or Thinker (`model.request`, `model.response`, latency, reasoner follow-up decisions, fallback speech, etc.) |
 | `client.hello.ack` | `{ clientId, participantId?, sessionStatus }` | Direct acknowledgement to registering socket |
 | `client.pong` | `{ sentAt?, receivedAt }` | Response to `client.ping` |
 | `client.joined` | `{ clientId, participantId?, connectedClients }` | A client completed `client.hello` registration |

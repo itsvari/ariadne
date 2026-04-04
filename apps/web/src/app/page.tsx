@@ -28,7 +28,7 @@ export default function AriadneControlPanel() {
   const [fulfilledDirectives, setFulfilledDirectives] = useState<DashboardState['directives']['fulfilled']>([]);
   
   // Local state for dropdowns
-  const [interventionMode, setInterventionMode] = useState<'control' | 'light' | 'heavy'>('light');
+  const [interventionMode, setInterventionMode] = useState<'control' | 'light'>('light');
   const [thinkerIntervalSec, setThinkerIntervalSec] = useState(60);
   
   const [isBusy, setIsBusy] = useState(false);
@@ -41,6 +41,7 @@ export default function AriadneControlPanel() {
   const ttsEncodingRef = useRef('linear16');
   const ttsSampleRateRef = useRef(24000);
   const ttsChannelsRef = useRef(1);
+  const ttsChunkCountRef = useRef(0);
   const audioQueueRef = useRef<Array<{ data: Uint8Array; sampleRateHz: number; channels: number }>>([]);
   const isAppendingRef = useRef(false);
 
@@ -293,6 +294,14 @@ export default function AriadneControlPanel() {
           ttsEncodingRef.current = payload.encoding ?? 'linear16';
           ttsSampleRateRef.current = payload.sampleRateHz ?? 24000;
           ttsChannelsRef.current = payload.channels ?? 1;
+          ttsChunkCountRef.current = 0;
+          audioQueueRef.current = [];
+
+          const audioContext = audioContextRef.current;
+          if (audioContext) {
+            nextPlaybackTimeRef.current = audioContext.currentTime;
+          }
+
           addEvent(
             'TTS',
             `Audio start: ${ttsEncodingRef.current} ${ttsSampleRateRef.current}Hz ${ttsChannelsRef.current}ch`,
@@ -311,13 +320,20 @@ export default function AriadneControlPanel() {
             sampleRateHz: payload.sampleRateHz ?? ttsSampleRateRef.current,
             channels: payload.channels ?? ttsChannelsRef.current,
           });
+          ttsChunkCountRef.current += 1;
           resumeAudioPlayback();
           flushAudioQueue();
           break;
         }
-        case 'tts.audio.done':
-          addEvent('TTS', `Audio stream complete.`);
+        case 'tts.audio.done': {
+          const audioContext = audioContextRef.current;
+          if (audioContext) {
+            nextPlaybackTimeRef.current = audioContext.currentTime;
+          }
+          audioQueueRef.current = [];
+          addEvent('TTS', `Audio stream complete. ${ttsChunkCountRef.current} chunk(s).`);
           break;
+        }
         default:
           addEvent(event.type, JSON.stringify(event.payload));
       }
@@ -533,7 +549,6 @@ export default function AriadneControlPanel() {
                 >
                   <option value="control">Control (Manual)</option>
                   <option value="light">Light (Supervised)</option>
-                  <option value="heavy">Heavy (Autonomous)</option>
                 </select>
               </label>
 

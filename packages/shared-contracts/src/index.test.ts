@@ -12,7 +12,6 @@ describe('shared contracts', () => {
   it('accepts valid intervention modes', () => {
     expect(InterventionModeSchema.parse('control')).toBe('control');
     expect(InterventionModeSchema.parse('light')).toBe('light');
-    expect(InterventionModeSchema.parse('heavy')).toBe('heavy');
   });
 
   it('parses session config defaults', () => {

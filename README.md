@@ -95,7 +95,9 @@ npm test
 
 ## Protocol Highlights (Latest)
 
-- `client.hello` accepts optional partial session config (`interventionMode`, `groupSize`, `taskId`, `phase`, `thinkerIntervalSec`).
+- `client.hello` accepts optional partial session config (`interventionMode`, `groupSize`, `taskId`, `phase`, `thinkerIntervalSec`). `interventionMode` currently supports `control` and `light`.
 - `avatar.command` supports command priority (`reactive` or `planned`) and includes expression commands.
 - Streaming STT over WebSocket now includes a dedicated broadcast event: `stt.transcript`.
 - Session status and recent event history are available via `GET /session/status?sessionId=<id>`.
+- Talker context window is configurable with `TALKER_CONTEXT_TURNS` (default: 10 turns).
+- Thinker runs on full session history and updates belief store and directives with the latest world state context.

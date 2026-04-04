@@ -15,8 +15,15 @@ import {
 
 const SYSTEM_PROMPTS: Record<InterventionMode, string> = {
   control: `You are Ariadne, a concise discussion facilitator in a VR world.
-NEVER output markdown formatting.
+Output plain spoken text only.
+Do not output markdown syntax of any kind: no bullets, numbered lists, asterisks, underscores, headings, backticks, links, or tables.
 User messages may be prefixed with [Speaker ID]: if multiple people are speaking. Use this to distinguish users.
+
+DIRECTIVE EXECUTION (RELEVANCE-AWARE):
+Pending directives are strategic suggestions, not unconditional commands.
+Before acting, evaluate whether a directive is still relevant to the latest user utterance, current topic, and world state.
+If relevant, call "dequeue_directive" and execute it.
+If no directive is relevant (conversation has moved on), ignore pending directives for this turn and respond to the current conversation naturally.
 
 TOOL USAGE RULES:
 - "speak": Use this to emit speech and respond to users.
@@ -31,8 +38,15 @@ You must be patient and NOT overly eager to respond. Default to waiting (idle) r
 4. WHEN TO SPEAK: ONLY use the "speak" tool if a user asks you a direct question, explicitly asks for your input, or if there is a definitive, clear halt in the entire conversation where your facilitation is absolutely required.`,
 
   light: `You are Ariadne, a concise discussion facilitator in a VR world.
-NEVER output markdown formatting.
+Output plain spoken text only.
+Do not output markdown syntax of any kind: no bullets, numbered lists, asterisks, underscores, headings, backticks, links, or tables.
 User messages may be prefixed with [Speaker ID]: if multiple people are speaking. Use this to distinguish users.
+
+DIRECTIVE EXECUTION (RELEVANCE-AWARE):
+Pending directives are strategic suggestions, not unconditional commands.
+Before acting, evaluate whether a directive is still relevant to the latest user utterance, current topic, and world state.
+If relevant, call "dequeue_directive" and execute it.
+If no directive is relevant (conversation has moved on), ignore pending directives for this turn and respond to the current conversation naturally.
 
 TOOL USAGE RULES:
 - "speak": Use this to emit speech and respond to users.
@@ -44,22 +58,6 @@ Default to waiting (idle). You may intervene in two cases:
 2. You notice a significant participation imbalance — one speaker is dominating while others have not spoken for a long time. In that case you may gently invite quieter participants to share their thoughts.
 
 In ALL other situations, call "avatar_command" with {"command": "idle"} and let the humans converse.`,
-
-  heavy: `You are Ariadne, an active discussion facilitator in a VR world.
-NEVER output markdown formatting.
-User messages may be prefixed with [Speaker ID]: if multiple people are speaking. Use this to distinguish users.
-
-TOOL USAGE RULES:
-- "speak": Use this to emit speech and respond to users.
-- "avatar_command": Use this to control your VR avatar. Use the "idle" command only when you have nothing to add right now.
-
-BEHAVIOUR - HEAVY FACILITATION:
-Actively guide the group toward productive collaboration:
-- Recap key points and summarise progress regularly.
-- Redirect off-topic threads back to the task.
-- Encourage balanced participation — call on quieter members by name/speaker-id.
-- Suggest next steps when the group stalls.
-- You still respect turn-taking: do not interrupt mid-sentence, but step in whenever there is a brief pause and facilitation would help.`,
 };
 
 export interface TalkerToolRuntime {
@@ -86,7 +84,7 @@ export async function runTalkerTurn(
   const {
     provider,
     request,
-    model = process.env.OPENROUTER_MODEL ?? 'openrouter/hunter-alpha',
+    model = process.env.OPENROUTER_MODEL ?? 'qwen/qwen3.6-plus:free',
     toolRuntime,
     maxToolSteps = 4,
     onTelemetry,
@@ -99,6 +97,17 @@ export async function runTalkerTurn(
   let lastResult: ChatCompletionResult = { content: null };
 
   for (let step = 0; step < maxToolSteps; step += 1) {
+    onTelemetry?.({
+      type: 'model.request',
+      sessionId: request.sessionId,
+      component: 'talker',
+      step,
+      model,
+      messageCount: currentMessages.length,
+      tools: TALKER_TOOLS.map((tool) => tool.function.name),
+      lastUserMessage: getLastUserMessageSnippet(currentMessages),
+    });
+
     const startedAt = Date.now();
     const result = await provider.complete({
       messages: currentMessages,
@@ -122,6 +131,17 @@ export async function runTalkerTurn(
 
     lastResult = result;
 
+    onTelemetry?.({
+      type: 'model.response',
+      sessionId: request.sessionId,
+      component: 'talker',
+      step,
+      model,
+      hasToolCalls: Boolean(result.tool_calls?.length),
+      toolCalls: result.tool_calls?.map((toolCall) => toolCall.function.name) ?? [],
+      contentLength: result.content?.length ?? 0,
+    });
+
     if (!result.tool_calls?.length || !toolRuntime) {
       return result;
     }
@@ -133,6 +153,7 @@ export async function runTalkerTurn(
     });
 
     let executedAnyTool = false;
+    let terminalToolUsed = false;
 
     for (const toolCall of result.tool_calls) {
       const toolMessage = await executeTalkerToolCall(toolCall, toolRuntime);
@@ -143,6 +164,11 @@ export async function runTalkerTurn(
       executedAnyTool = true;
       currentMessages.push(toolMessage);
 
+      // End this turn as soon as the model has already taken a user-facing action.
+      if (toolCall.function.name === 'speak' || toolCall.function.name === 'avatar_command') {
+        terminalToolUsed = true;
+      }
+
       if (toolCall.function.name === 'speak') {
         onTelemetry?.({
           type: 'facilitator.intervention',
@@ -152,6 +178,10 @@ export async function runTalkerTurn(
           interventionMode: mode,
         });
       }
+    }
+
+    if (terminalToolUsed) {
+      return result;
     }
 
     if (!executedAnyTool) {
@@ -255,6 +285,20 @@ function makeToolMessage(toolCall: ToolCall, result: unknown): ChatMessage {
     tool_call_id: toolCall.id ?? toolCall.function.name,
     content: JSON.stringify(result),
   };
+}
+
+function getLastUserMessageSnippet(messages: ChatMessage[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== 'user' || typeof message.content !== 'string') {
+      continue;
+    }
+
+    const trimmed = message.content.trim();
+    return trimmed.length > 240 ? `${trimmed.slice(0, 240)}...<truncated>` : trimmed;
+  }
+
+  return null;
 }
 
 export { TALKER_TOOLS };

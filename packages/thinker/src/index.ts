@@ -58,7 +58,7 @@ export async function runThinkerTurn(
     fullHistory,
     worldState,
     currentBeliefStore,
-    model = process.env.OPENROUTER_MODEL ?? 'openrouter/hunter-alpha',
+    model = process.env.OPENROUTER_MODEL ?? 'qwen/qwen3.6-plus:free',
     toolRuntime,
     maxToolSteps = 4,
     onTelemetry,
@@ -82,11 +82,31 @@ export async function runThinkerTurn(
     ...conversation,
   ];
 
+  onTelemetry?.({
+    type: 'thinker.context',
+    sessionId,
+    fullHistoryCount: fullHistory.length,
+    hasWorldState: Boolean(worldState),
+    beliefParticipants: currentBeliefStore.participants.length,
+    pendingDirectiveCount: currentBeliefStore.directive_queue.length,
+  });
+
   let lastBeliefStore = currentBeliefStore;
   const directives: Directive[] = [];
   let completion: ChatCompletionResult = { content: null };
 
   for (let step = 0; step < maxToolSteps; step += 1) {
+    onTelemetry?.({
+      type: 'model.request',
+      sessionId,
+      component: 'thinker',
+      step,
+      model,
+      messageCount: messages.length,
+      tools: THINKER_TOOLS.map((tool) => tool.function.name),
+      lastUserMessage: getLastUserMessageSnippet(messages),
+    });
+
     const startedAt = Date.now();
     completion = await provider.complete({
       messages,
@@ -105,6 +125,17 @@ export async function runThinkerTurn(
       component: 'thinker',
       latencyMs: Date.now() - startedAt,
       model,
+    });
+
+    onTelemetry?.({
+      type: 'model.response',
+      sessionId,
+      component: 'thinker',
+      step,
+      model,
+      hasToolCalls: Boolean(completion.tool_calls?.length),
+      toolCalls: completion.tool_calls?.map((toolCall) => toolCall.function.name) ?? [],
+      contentLength: completion.content?.length ?? 0,
     });
 
     if (!completion.tool_calls?.length || !toolRuntime) {
@@ -155,21 +186,15 @@ async function executeThinkerToolCall(
   switch (toolCall.function.name) {
     case 'write_belief_store': {
       if (!runtime.write_belief_store) return null;
+      const decodedStore = decodeBeliefStoreArgument(args.store, lastBeliefStore);
       const result = await runtime.write_belief_store({
-        store: BeliefStoreSchema.parse(args.store ?? lastBeliefStore),
+        store: decodedStore,
       });
       return makeToolMessage(toolCall, result);
     }
     case 'enqueue_directive': {
       if (!runtime.enqueue_directive) return null;
-      const directive = DirectiveSchema.parse(
-        args.directive ?? {
-          id: crypto.randomUUID(),
-          instruction: 'Follow up with the group.',
-          priority: 'medium',
-          createdAt: new Date().toISOString(),
-        },
-      );
+      const directive = decodeDirectiveArgument(args.directive);
       const result = await runtime.enqueue_directive({ directive });
       if (result) {
         directives.push(result);
@@ -196,6 +221,237 @@ async function executeThinkerToolCall(
   }
 }
 
+function decodeBeliefStoreArgument(rawStore: unknown, fallback: BeliefStore): BeliefStore {
+  const rawValue = parseMaybeJson(rawStore);
+  if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
+    return fallback;
+  }
+
+  const nowIso = new Date().toISOString();
+  const source = rawValue as Record<string, unknown>;
+
+  const normalizedParticipants = Array.isArray(source.participants)
+    ? source.participants
+        .map((entry, index) => normalizeParticipant(entry, index))
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    : fallback.participants;
+
+  const normalizedDirectives = Array.isArray(source.directive_queue)
+    ? source.directive_queue
+        .map((entry, index) => normalizeDirective(entry, index, nowIso))
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    : fallback.directive_queue;
+
+  const discussionState = normalizeDiscussionState(source.discussion_state, fallback);
+
+  const normalizedCandidate: Record<string, unknown> = {
+    ...fallback,
+    ...source,
+    participants: normalizedParticipants,
+    discussion_state: discussionState,
+    facilitation_plan: Array.isArray(source.facilitation_plan)
+      ? source.facilitation_plan.map((entry) => String(entry))
+      : fallback.facilitation_plan,
+    directive_queue: normalizedDirectives,
+    conversation_summary:
+      typeof source.conversation_summary === 'string'
+        ? source.conversation_summary
+        : fallback.conversation_summary,
+    updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : nowIso,
+  };
+
+  const parsed = BeliefStoreSchema.safeParse(normalizedCandidate);
+  if (parsed.success) {
+    return parsed.data;
+  }
+
+  console.warn('[thinker] write_belief_store received invalid payload; using last valid belief store.', {
+    issues: parsed.error.issues,
+  });
+  return fallback;
+}
+
+function decodeDirectiveArgument(rawDirective: unknown): Directive {
+  const nowIso = new Date().toISOString();
+  const defaultDirective: Directive = {
+    id: crypto.randomUUID(),
+    instruction: 'Follow up with the group.',
+    priority: 'medium',
+    createdAt: nowIso,
+  };
+
+  const parsedRawDirective = parseMaybeJson(rawDirective);
+
+  if (typeof parsedRawDirective === 'string') {
+    const instruction = parsedRawDirective.trim();
+    if (!instruction) {
+      return defaultDirective;
+    }
+    return {
+      ...defaultDirective,
+      instruction,
+    };
+  }
+
+  if (!parsedRawDirective || typeof parsedRawDirective !== 'object' || Array.isArray(parsedRawDirective)) {
+    return defaultDirective;
+  }
+
+  const candidate = parsedRawDirective as Record<string, unknown>;
+  const normalizedCandidate: Record<string, unknown> = {
+    id: typeof candidate.id === 'string' ? candidate.id : defaultDirective.id,
+    instruction:
+      typeof candidate.instruction === 'string' && candidate.instruction.trim().length > 0
+        ? candidate.instruction
+        : defaultDirective.instruction,
+    priority:
+      candidate.priority === 'low' || candidate.priority === 'medium' || candidate.priority === 'high'
+        ? candidate.priority
+        : defaultDirective.priority,
+    createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : defaultDirective.createdAt,
+  };
+
+  const parsed = DirectiveSchema.safeParse(normalizedCandidate);
+  if (parsed.success) {
+    return parsed.data;
+  }
+
+  console.warn('[thinker] enqueue_directive received invalid payload; using default directive.', {
+    issues: parsed.error.issues,
+  });
+  return defaultDirective;
+}
+
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return value;
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
+function normalizeParticipant(entry: unknown, index: number): Record<string, unknown> | null {
+  const parsedEntry = parseMaybeJson(entry);
+
+  if (typeof parsedEntry === 'string') {
+    const speakerId = parsedEntry.trim();
+    if (!speakerId) {
+      return null;
+    }
+    return {
+      id: speakerId,
+      stance: 'unknown',
+      emotionalTone: 'neutral',
+      engagementLevel: 0.5,
+      speakingFrequency: 0,
+    };
+  }
+
+  if (!parsedEntry || typeof parsedEntry !== 'object' || Array.isArray(parsedEntry)) {
+    return null;
+  }
+
+  const candidate = parsedEntry as Record<string, unknown>;
+  const rawId = candidate.id;
+  const participantId = typeof rawId === 'string'
+    ? rawId
+    : typeof rawId === 'number'
+      ? String(rawId)
+      : `participant_${index + 1}`;
+
+  return {
+    ...candidate,
+    id: participantId,
+  };
+}
+
+function normalizeDirective(entry: unknown, index: number, nowIso: string): Record<string, unknown> | null {
+  const parsedEntry = parseMaybeJson(entry);
+
+  if (typeof parsedEntry === 'string') {
+    const instruction = parsedEntry.trim();
+    if (!instruction) {
+      return null;
+    }
+    return {
+      id: `directive_${index + 1}_${Date.now()}`,
+      instruction,
+      priority: 'medium',
+      createdAt: nowIso,
+    };
+  }
+
+  if (!parsedEntry || typeof parsedEntry !== 'object' || Array.isArray(parsedEntry)) {
+    return null;
+  }
+
+  const candidate = parsedEntry as Record<string, unknown>;
+  return {
+    ...candidate,
+    id: typeof candidate.id === 'string' ? candidate.id : `directive_${index + 1}_${Date.now()}`,
+    instruction: typeof candidate.instruction === 'string' ? candidate.instruction : 'Follow up with the group.',
+    priority:
+      candidate.priority === 'low' || candidate.priority === 'medium' || candidate.priority === 'high'
+        ? candidate.priority
+        : 'medium',
+    createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : nowIso,
+  };
+}
+
+function normalizeDiscussionState(
+  value: unknown,
+  fallback: BeliefStore,
+): Record<string, unknown> {
+  const parsedValue = parseMaybeJson(value);
+
+  if (typeof parsedValue === 'string') {
+    return {
+      currentTopic: parsedValue,
+      phase: fallback.discussion_state.phase,
+      openQuestions: fallback.discussion_state.openQuestions,
+    };
+  }
+
+  if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) {
+    return fallback.discussion_state;
+  }
+
+  const candidate = parsedValue as Record<string, unknown>;
+  return {
+    currentTopic:
+      typeof candidate.currentTopic === 'string'
+        ? candidate.currentTopic
+        : fallback.discussion_state.currentTopic,
+    phase: typeof candidate.phase === 'string' ? candidate.phase : fallback.discussion_state.phase,
+    openQuestions: Array.isArray(candidate.openQuestions)
+      ? candidate.openQuestions.map((entry) => String(entry))
+      : fallback.discussion_state.openQuestions,
+  };
+}
+
+function getLastUserMessageSnippet(messages: ChatMessage[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== 'user' || typeof message.content !== 'string') {
+      continue;
+    }
+
+    const trimmed = message.content.trim();
+    return trimmed.length > 240 ? `${trimmed.slice(0, 240)}...<truncated>` : trimmed;
+  }
+
+  return null;
+}
+
 function makeToolMessage(toolCall: ToolCall, result: unknown): ChatMessage {
   return {
     role: 'tool',
@@ -209,10 +465,15 @@ export function startThinkerScheduler(
   intervalMs: number,
   callback: () => void | Promise<void>,
 ): ThinkerSchedulerControls {
+  const runCallbackSafely = (): void => {
+    Promise.resolve(callback()).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[thinker.scheduler] callback failed: ${message}`);
+    });
+  };
+
   let currentInterval = intervalMs;
-  let timer = setInterval(() => {
-    void callback();
-  }, currentInterval);
+  let timer = setInterval(runCallbackSafely, currentInterval);
 
   return {
     stop() {
@@ -221,9 +482,7 @@ export function startThinkerScheduler(
     reschedule(nextIntervalMs: number) {
       currentInterval = nextIntervalMs;
       clearInterval(timer);
-      timer = setInterval(() => {
-        void callback();
-      }, currentInterval);
+      timer = setInterval(runCallbackSafely, currentInterval);
     },
   };
 }

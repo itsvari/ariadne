@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const InterventionModeSchema = z.enum(['control', 'light', 'heavy']);
+export const InterventionModeSchema = z.enum(['control', 'light']);
 export type InterventionMode = z.infer<typeof InterventionModeSchema>;
 
 export const SessionConfigSchema = z.object({

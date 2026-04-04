@@ -21,7 +21,7 @@ export interface SessionStatusView {
   active: boolean;
   talkerStatus: 'idle' | 'active' | 'waiting';
   thinkerStatus: 'idle' | 'running' | 'scheduled';
-  interventionMode: 'control' | 'light' | 'heavy';
+  interventionMode: 'control' | 'light';
   thinkerIntervalSec: number;
   lastThinkerRunAt: string | null;
   startedAt: string;
