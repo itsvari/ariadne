@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
 const { spawn } = require('child_process');
 const { loadEnvConfig } = require('@next/env');
 const path = require('path');

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, BrainCircuit, Mic, MicOff, Play, Power, Radio, Sparkles, Terminal } from 'lucide-react';
+import { Activity, BrainCircuit, Mic, MicOff, Play, Power, Radio, Terminal } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import type { BeliefStore } from '@ariadne/shared-contracts';
@@ -261,7 +261,7 @@ export default function AriadneControlPanel() {
           addEvent(event.type, JSON.stringify(event.payload));
       }
     },
-    [addEvent, ensureAudioPipeline, flushAudioQueue, refreshDashboard],
+    [addEvent, ensureAudioPipeline, flushAudioQueue, refreshDashboard, resumeAudioPlayback],
   );
 
   useEffect(() => {
@@ -540,7 +540,7 @@ export default function AriadneControlPanel() {
             <div className="flex-1 overflow-y-auto pr-2 scrollbar-brutal flex flex-col gap-4" style={{ height: '600px' }}>
               {messages.length === 0 ? (
                 <div className="h-full flex items-center justify-center font-mono text-[var(--muted)] border-2 border-dashed border-[var(--border)]">
-                  // NO DATA IN BUFFER //
+                  {/* // NO DATA IN BUFFER // */}
                 </div>
               ) : (
                 messages.map((message) => (
