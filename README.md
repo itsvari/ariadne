@@ -75,12 +75,23 @@ npm run dev:web
 npm test
 ```
 
+The project includes **179 unit tests** across all 7 packages (~90% line coverage):
+
+| Package | Tests | Line Coverage |
+|---|---|---|
+| `shared-contracts` | 44 | 100% |
+| `chat-providers` | 16 | 100% |
+| `event-bus` | 9 | 100% |
+| `talker` | 20 | 90% |
+| `thinker` | 30 | 84% |
+| `tts-client` | 35 | 95% |
+| `shared-belief-store` | 25 | 84% |
+
 ## Documentation
 
 | Document | Description |
 |---|---|
 | [`project_ariadne_architecture.md`](./project_ariadne_architecture.md) | Full system architecture and design decisions |
-| [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) | Phase-by-phase build plan with completion status |
 | [`apps/server/README.md`](./apps/server/README.md) | Server REST API & WebSocket reference |
 
 ## Unity Integration Notes
@@ -101,3 +112,41 @@ npm test
 - Session status and recent event history are available via `GET /session/status?sessionId=<id>`.
 - Talker context window is configurable with `TALKER_CONTEXT_TURNS` (default: 10 turns).
 - Thinker runs on full session history and updates belief store and directives with the latest world state context.
+
+## Environment Variables Reference
+
+| Variable | Required | Description |
+|---|---|---|
+| `OPENROUTER_API_KEY` | **Yes** (server) | OpenRouter API key. Powers the Talker (and Thinker if Cerebras is not configured). |
+| `OPENROUTER_MODEL` | No | Override the default OpenRouter model (e.g. `google/gemini-2.0-flash-001`). |
+| `OPENROUTER_BASE_URL` | No | Override the OpenRouter base URL (default: `https://openrouter.ai/api/v1`). |
+| `CEREBRAS_API_KEY` | No | Cerebras API key. When set, the Thinker uses Cerebras instead of OpenRouter. |
+| `DEEPGRAM_API_KEY` | **Yes** (server) | API key for server-side TTS synthesis and STT transcription. |
+| `NEXT_PUBLIC_DEEPGRAM_API_KEY` | **Yes** (web) | API key for browser-side STT transcription in the control panel. |
+| `VALKEY_URL` | No | Valkey connection URL (default: `valkey://localhost:6379`). |
+| `NEXT_PUBLIC_SERVER_URL` | No | Server base URL for the web control panel (default: `http://localhost:8081`). |
+| `PORT` | No | HTTP port for the server (default: `8081`). |
+
+## Dependencies
+
+### Runtime
+- `iovalkey` — Valkey client (`shared-belief-store`)
+- `openai` — OpenRouter & Cerebras use OpenAI-compatible API (`chat-providers`)
+- `@deepgram/sdk` — STT transcription (`apps/server`) and TTS streaming (`tts-client`)
+- `ws` — WebSocket server (`apps/server`) and WebSocket client in Node.js (`tts-client`)
+- `express`, `cors` — HTTP server (`apps/server`)
+- `zod` — Runtime schema validation (`shared-contracts`)
+
+### Development
+- `turbo` — Monorepo build orchestration
+- `typescript` — Type checking
+- `vitest` — Unit testing (179 tests across 7 packages)
+- `@vitest/coverage-v8` — Code coverage reporting
+- `tsx` — TypeScript execution for dev and prod server scripts
+
+## Notes
+
+- All packages use TypeScript with `@ariadne/` internal package prefix.
+- The architecture document refers to System 2 as "Reasoner"; the codebase uses "Thinker" throughout.
+- The belief store schema is versioned in `shared-contracts` — coordinate updates across Talker and Thinker prompts.
+- The Thinker's periodic interval is configurable per session via `thinkerIntervalSec` in `SessionConfig`.

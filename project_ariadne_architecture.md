@@ -10,7 +10,7 @@
 
 Project Ariadne is an LLM-powered discussion facilitator that operates as an AI participant inside a multiplayer VR world (e.g., VRChat-style). It perceives the conversation through live audio streams from all players, interprets world state from a structured environment feed, and participates by speaking through a TTS model and controlling an in-world avatar.
 
-Ariadne is designed to support natural, low-latency conversational interaction while also providing thoughtful, strategic facilitation — achieved through a dual-agent architecture: a fast **Talker** and a slower **Reasoner**.
+Ariadne is designed to support natural, low-latency conversational interaction while also providing thoughtful, strategic facilitation — achieved through a dual-agent architecture: a fast **Talker** and a slower **Thinker**.
 
 The system will be built primarily in **TypeScript**, including orchestration, service boundaries, shared schemas, and subsystem interfaces unless a specific component has a clear reason to use another language.
 
@@ -18,32 +18,32 @@ The system will be built primarily in **TypeScript**, including orchestration, s
 
 ## 2. System Architecture
 
-### 2.1 Architectural Pattern: Talker-Reasoner
+### 2.1 Architectural Pattern: Talker-Thinker
 
-Ariadne follows the **Talker-Reasoner** dual-agent pattern, inspired by Kahneman's System 1/System 2 cognitive model and formalised in DeepMind's 2024 paper of the same name.
+Ariadne follows the **Talker-Thinker** dual-agent pattern, inspired by Kahneman's System 1/System 2 cognitive model and formalised in DeepMind's 2024 paper of the same name (where it is called "Talker-Reasoner"; this codebase uses "Thinker" throughout).
 
 - The **Talker** (System 1) is a fast, small-to-medium LLM. It reacts to conversation events in near real-time, producing speech and reactive avatar commands.
-- The **Reasoner/Thinker** (System 2) is a capable, slower LLM. It runs periodically (~every 60 seconds) or on-demand, analyses the full conversation and world state, and updates a shared belief store with strategic guidance for the Talker. **Note:** the architecture literature refers to this agent as the "Reasoner"; the codebase uses "Thinker" throughout.
-- Both agents communicate primarily through a **Shared Belief Store**. The Reasoner/Thinker writes; the Talker reads.
+- The **Thinker** (System 2) is a capable, slower LLM. It runs periodically (~every 60 seconds) or on-demand, analyses the full conversation and world state, and updates a shared belief store with strategic guidance for the Talker.
+- Both agents communicate primarily through a **Shared Belief Store**. The Thinker writes; the Talker reads.
 
 ### 2.2 High-Level Data Flow
 
 ```
 [Player Audio x N] ──► [Streaming STT + Speaker ID] ──┐
 [VR World State]   ──► [World State Summariser]        ├──► [Event Bus]
-                                                        │
-                    ┌───────────────────────────────────┘
-                    ▼
-             [Event Router]
-             /             \
-     [Talker Model]    [Reasoner Model]
-            |    \           |
-            |     └──trigger──┘
-            |
-     reads ◄──── [Shared Belief Store] ◄──── writes
-            |
-            ▼
-   [TTS Engine]   [Avatar Controller]
+                                                         │
+                     ┌───────────────────────────────────┘
+                     ▼
+              [Event Router]
+              /             \
+      [Talker Model]    [Thinker Model]
+             |    \           |
+             |     └──trigger──┘
+             |
+      reads ◄──── [Shared Belief Store] ◄──── writes
+             |
+             ▼
+    [TTS Engine]   [Avatar Controller]
 ```
 
 ### 2.3 Repository Structure
@@ -57,7 +57,7 @@ The codebase should be organised in a monorepo-like structure, with each major s
 - `packages/shared-contracts` — TypeScript types and Zod schemas
 - `packages/chat-providers` — OpenRouter and Cerebras chat providers
 - `packages/talker` — Talker agent (System 1)
-- `packages/thinker` — Thinker agent (System 2, called "Reasoner" in the pattern literature)
+- `packages/thinker` — Thinker agent (System 2)
 - `packages/shared-belief-store` — Valkey-backed belief store
 - `packages/event-bus` — In-process event routing
 - `packages/tts-client` — Deepgram TTS streaming integration
@@ -96,18 +96,18 @@ Shared TypeScript types and schemas live in `packages/shared-contracts` so that 
 
 - Acts as the central message broker for all events in the system.
 - Delivers events to the Talker immediately.
-- Delivers events to the Reasoner's context accumulator on its own schedule.
+- Delivers events to the Thinker's context accumulator on its own schedule.
 
 **Key Event Types:**
 
 | Event | Producer | Consumer(s) |
 | --- | --- | --- |
 | `UtteranceChunk` | Input Pipeline | Talker |
-| `UtteranceFinal` | Input Pipeline | Talker, Reasoner context buffer |
-| `WorldStateUpdate` | Input Pipeline | Talker (as context), Reasoner |
-| `ReasonerComplete` | Reasoner | Talker (wake / update signal) |
-| `TalkerWaitFlag` | Talker | Reasoner (early trigger) |
-| `AvatarCommand` | Talker, Reasoner | Avatar Controller |
+| `UtteranceFinal` | Input Pipeline | Talker, Thinker context buffer |
+| `WorldStateUpdate` | Input Pipeline | Talker (as context), Thinker |
+| `ThinkerComplete` | Thinker | Talker (wake / update signal) |
+| `TalkerWaitFlag` | Talker | Thinker (early trigger) |
+| `AvatarCommand` | Talker, Thinker | Avatar Controller |
 
 ---
 
@@ -115,18 +115,18 @@ Shared TypeScript types and schemas live in `packages/shared-contracts` so that 
 
 **Responsibilities:**
 
-- Serves as the persistent, structured memory shared between the Talker and Reasoner.
-- The Reasoner holds write authority. The Talker reads only.
-- Persists across Reasoner cycles; represents the Reasoner's current understanding of the conversation.
+- Serves as the persistent, structured memory shared between the Talker and Thinker.
+- The Thinker holds write authority. The Talker reads only.
+- Persists across Thinker cycles; represents the Thinker's current understanding of the conversation.
 
 **Schema (to be fully defined):**
 The belief store schema will be defined as part of a dedicated design session. At minimum, it should capture:
 
 - `participants` — per-player model: speaking frequency, current stance/topic, emotional tone, engagement level
 - `discussion_state` — current topic, discussion phase (e.g., brainstorm, debate, convergence), key open questions
-- `facilitation_plan` — the Reasoner's current strategic intent (e.g., "encourage quieter participants", "redirect off-topic thread")
+- `facilitation_plan` — the Thinker's current strategic intent (e.g., "encourage quieter participants", "redirect off-topic thread")
 - `directive_queue` — ordered list of specific instructions for the Talker to execute (text to say, actions to take)
-- `conversation_summary` — a rolling compressed summary of conversation history, managed by the Reasoner
+- `conversation_summary` — a rolling compressed summary of conversation history, managed by the Thinker
 
 **Notes:**
 
@@ -141,8 +141,8 @@ The belief store schema will be defined as part of a dedicated design session. A
 
 - React to incoming utterance events in near real-time.
 - Produce conversational speech and reactive avatar commands.
-- Decide whether to respond immediately or wait for the Reasoner.
-- Flag complex situations to the Reasoner for early invocation.
+- Decide whether to respond immediately or wait for the Thinker.
+- Flag complex situations to the Thinker for early invocation.
 
 **Context Window (at inference time):**
 
@@ -163,7 +163,7 @@ The belief store schema will be defined as part of a dedicated design session. A
 **Talker Wait Triggers:**
 The Talker must call `wait_for_reasoner()` before responding when any of the following conditions are met:
 
-- The directive queue is non-empty (the Reasoner has queued a specific next action)
+- The directive queue is non-empty (the Thinker has queued a specific next action)
 - A player explicitly asks for a summary, synthesis, or decision
 - The Talker has just called `trigger_reasoner()` and the nature of the situation requires a thoughtful response (not a filler acknowledgement)
 - A significant world state change has just occurred (e.g., players have moved to a new area)
@@ -174,8 +174,6 @@ In all other cases, the Talker proceeds with the most recent available belief st
 
 ### 3.5 Thinker Model (System 2)
 
-> **Note:** This agent is called "Thinker" in the codebase and "Reasoner" in the academic pattern. The terms refer to the same component.
-
 **Responsibilities:**
 
 - Perform deep analysis of the full conversation history and world state.
@@ -185,7 +183,7 @@ In all other cases, the Talker proceeds with the most recent available belief st
 
 **Invocation:**
 
-- **Periodic:** Every ~60 seconds by default.
+- **Periodic:** Every ~60 seconds by default, configurable per session via `thinkerIntervalSec`.
 - **On-demand:** When the Talker calls `trigger_reasoner()` or `wait_for_reasoner()`.
 
 **Context Window (at inference time):**
@@ -194,16 +192,16 @@ In all other cases, the Talker proceeds with the most recent available belief st
 - Current world state summary
 - Current belief store (as a starting point for updating)
 
-**Tool Calls available to Reasoner:**
+**Tool Calls available to Thinker:**
 
 - `write_belief_store(updated_store)` — overwrites the belief store with the new version
 - `enqueue_directive(directive)` — pushes a specific instruction onto the Talker's directive queue
 - `avatar_command(command)` — sends a planned avatar command (e.g., repositioning) to the Avatar Controller
-- `compact_history(up_to_timestamp)` — triggers summarisation of conversation history older than a given point, storing the result in the belief store summary field
+- `compact_history(summary)` — triggers summarisation of conversation history, storing the result in the belief store summary field
 - `read_world_state()` — fetches the latest world state summary
 
-**Reasoner Output Responsibilities:**
-After each cycle, the Reasoner must at minimum:
+**Thinker Output Responsibilities:**
+After each cycle, the Thinker must at minimum:
 
 1. Write an updated belief store (even if no material changes).
 2. Clear fulfilled directives from the queue.
@@ -218,15 +216,15 @@ After each cycle, the Reasoner must at minimum:
 **Responsibilities:**
 
 - Translate structured avatar commands into in-world avatar behaviour in the VR environment.
-- Manage a command priority and interrupt system (Reasoner-planned behaviours can be overridden by Talker reactive commands).
-- Expose a stable command API for both the Talker and Reasoner to call via `avatar_command(command)`.
+- Manage a command priority and interrupt system (Thinker-planned behaviours can be overridden by Talker reactive commands).
+- Expose a stable command API for both the Talker and Thinker to call via `avatar_command(command)`.
 
 **Command Schema (to be finalised with Avatar Controller team):**
 All commands should be expressible as a structured object with at least:
 
 - `type` — one of a finite, agreed-upon command vocabulary (see below)
 - `target` — optional reference to a player or world object
-- `priority` — `reactive` (from Talker, high interrupt priority) or `planned` (from Reasoner, lower interrupt priority)
+- `priority` — `reactive` (from Talker, high interrupt priority) or `planned` (from Thinker, lower interrupt priority)
 - `parameters` — type-specific arguments
 
 **Command Vocabulary (draft):**
@@ -242,7 +240,7 @@ All commands should be expressible as a structured object with at least:
 **Priority System:**
 
 - `reactive` commands from the Talker (e.g., gaze shifts, nods) interrupt any in-progress `planned` behaviour.
-- `planned` commands from the Reasoner (e.g., moving to a new area) execute when no higher-priority command is pending.
+- `planned` commands from the Thinker (e.g., moving to a new area) execute when no higher-priority command is pending.
 - The Avatar Controller queues `planned` commands and executes them opportunistically between reactive commands.
 
 ---
@@ -273,9 +271,9 @@ All commands should be expressible as a structured object with at least:
 
 The full transcript of the session is maintained as a append-only log. As the session grows:
 
-- The Reasoner periodically calls `compact_history()`, summarising older segments into a compressed narrative stored in the belief store.
+- The Thinker periodically calls `compact_history()`, summarising older segments into a compressed narrative stored in the belief store.
 - The Talker's context uses only the recent uncompacted window plus the belief store summary.
-- The Reasoner's context uses the full log for deep analysis cycles, switching to compacted history once the log exceeds a manageable size.
+- The Thinker's context uses the full log for deep analysis cycles, switching to compacted history once the log exceeds a manageable size.
 
 ### 4.2 Latency Budget
 
@@ -288,7 +286,7 @@ The full transcript of the session is maintained as a append-only log. As the se
 
 ### 4.3 Prompt & Schema Versioning
 
-All prompt templates for the Talker and Reasoner, the belief store schema, and the avatar command schema should be version-controlled. Changes to any shared schema (especially the belief store) require coordinated updates to both agents' prompts.
+All prompt templates for the Talker and Thinker, the belief store schema, and the avatar command schema should be version-controlled. Changes to any shared schema (especially the belief store) require coordinated updates to both agents' prompts.
 
 ### 4.4 Session State & Recovery
 
@@ -297,9 +295,8 @@ All prompt templates for the Talker and Reasoner, the belief store schema, and t
 
 ### 4.5 Process Model & Parallelism
 
-- The implementation should use multiprocessing or separate worker processes where it materially improves latency, throughput, or fault isolation.
-- Likely candidates include streaming STT workers, audio processing, TTS streaming, Reasoner execution, and any CPU-heavy summarisation or compaction tasks.
-- The default assumption should not be that all subsystems run in a single Node.js process; process boundaries are acceptable and desirable when they reduce contention on the real-time Talker path.
+- The implementation uses a single Node.js process for the orchestration server, with async concurrency for non-blocking I/O.
+- Likely candidates for future separation include streaming STT workers, audio processing, TTS streaming, Thinker execution, and any CPU-heavy summarisation or compaction tasks.
 - Inter-process interfaces should still use the same shared TypeScript contracts to avoid schema drift across subsystem boundaries.
 
 ---
@@ -308,15 +305,15 @@ All prompt templates for the Talker and Reasoner, the belief store schema, and t
 
 | Interface | From | To | Protocol / Format |
 | --- | --- | --- | --- |
-| Audio streams | VR World | Input Pipeline | To be defined |
-| World state feed | VR World | Input Pipeline | To be defined |
-| Event Bus messages | Input Pipeline | Talker, Reasoner | To be defined |
-| Belief store read/write | Talker (read), Reasoner (write) | Shared Belief Store | Structured JSON |
-| Talker tool calls | Talker | TTS, Avatar Controller, Belief Store, Reasoner | LLM tool call schema |
-| Reasoner tool calls | Reasoner | Belief Store, Avatar Controller, History Store | LLM tool call schema |
-| Avatar command API | Talker, Reasoner | Avatar Controller | Structured JSON (see Section 3.6) |
-| TTS input | Talker | TTS Engine | Streaming text |
-| Audio output | TTS Engine | VR spatial audio | To be defined |
+| Audio streams | VR World | Input Pipeline | WebSocket (`client.audio.chunk`, `client.audio.commit`) |
+| World state feed | VR World | Input Pipeline | WebSocket (`client.world_state`) |
+| Event Bus messages | Input Pipeline | Talker, Thinker | In-process EventEmitter (`packages/event-bus`) |
+| Belief store read/write | Talker (read), Thinker (write) | Shared Belief Store | Valkey (Redis-compatible) |
+| Talker tool calls | Talker | TTS, Avatar Controller, Belief Store, Thinker | LLM tool call schema |
+| Thinker tool calls | Thinker | Belief Store, Avatar Controller, History Store | LLM tool call schema |
+| Avatar command API | Talker, Thinker | Avatar Controller | Structured JSON (see Section 3.6) |
+| TTS input | Talker | TTS Engine | Streaming text via Deepgram Aura WebSocket |
+| Audio output | TTS Engine | VR spatial audio | WebSocket (`tts.audio.chunk` broadcast) |
 
 ---
 
@@ -325,12 +322,28 @@ All prompt templates for the Talker and Reasoner, the belief store schema, and t
 Items deferred for future design sessions:
 
 - [x] ~~Belief store full schema definition~~ — implemented in `packages/shared-contracts`
-- [ ] STT provider and latency profile — currently using Deepgram Nova-3 (server-side batch); streaming STT not yet wired
-- [ ] Talker and Reasoner model selection — currently configurable via env vars
 - [x] ~~Event Bus technology choice~~ — in-process EventEmitter-based bus in `packages/event-bus`
-- [ ] Exact token thresholds triggering history compaction
-- [ ] Avatar command vocabulary finalisation (with Avatar Controller team)
 - [x] ~~TTS provider and streaming interface~~ — Deepgram Aura WebSocket streaming in `packages/tts-client`
 - [x] ~~Session persistence storage technology~~ — Valkey (Redis-compatible) via `packages/shared-belief-store`
+- [x] ~~Talker and Thinker model selection~~ — configurable via env vars (`OPENROUTER_MODEL`, `CEREBRAS_API_KEY`)
+- [ ] Streaming STT provider and latency profile — currently using Deepgram Nova-3 batch transcription; real-time streaming STT not yet wired
+- [ ] Exact token thresholds triggering history compaction
+- [ ] Avatar command vocabulary finalisation (with Avatar Controller team)
 - [ ] Multi-session memory (should the AI remember participants across separate sessions?)
 - [ ] Moderator override interface (ability for a human operator to inject directives)
+
+## 7. Testing
+
+The project includes **179 unit tests** across all 7 packages (~90% line coverage), using Vitest with `@vitest/coverage-v8`.
+
+| Package | Tests | Line Coverage | Focus Areas |
+|---|---|---|---|
+| `shared-contracts` | 44 | 100% | All Zod schemas, utility functions, validation failures |
+| `chat-providers` | 16 | 100% | Cerebras & OpenRouter providers, request/response mapping, error handling |
+| `event-bus` | 9 | 100% | Subscribe/publish, unsubscribe, timeout, multiple subscribers, async handlers |
+| `talker` | 20 | 90% | Control/light prompts, tool execution loop, all 6 tool handlers, telemetry |
+| `thinker` | 30 | 84% | All 5 tool handlers, normalization functions, scheduler, snippet truncation |
+| `tts-client` | 35 | 95% | WebSocket lifecycle, binary/text handling, handshake failures, encoding options |
+| `shared-belief-store` | 25 | 84% | All 16 public methods with mocked Valkey (CRUD, directives, history, archives) |
+
+Run `npm test` to execute the full suite, or `npm test -- --coverage` for a coverage report.
