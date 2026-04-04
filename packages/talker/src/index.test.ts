@@ -24,7 +24,7 @@ describe('runTalkerTurn', () => {
       },
     });
 
-    expect(provider.lastParams?.messages[0]?.content).toContain('Stay out of the way');
+    expect(provider.lastParams?.messages[0]?.content).toContain('stay out of the way');
   });
 
   it('exposes the talker toolset', async () => {

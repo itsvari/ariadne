@@ -1,5 +1,7 @@
 import type { WorldState } from '@ariadne/shared-contracts';
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
+
 export interface EventEnvelope<TType extends string, TPayload> {
   type: TType;
   sessionId: string;
@@ -72,7 +74,7 @@ export class EventBus {
 
   requestResponse<T extends EventBusEvent['type']>(
     eventType: T,
-    timeoutMs = 5000,
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Promise<Extract<EventBusEvent, { type: T }>> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

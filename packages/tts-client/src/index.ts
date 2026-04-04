@@ -47,7 +47,7 @@ export class DeepgramTTSProvider implements TTSProvider {
             try {
               controller.enqueue(chunk);
             } catch {
-              // Controller may already be closed if cancellation raced with socket events.
+              // controller may already be closed if cancellation raced with socket events.
               isClosed = true;
             }
           };
@@ -60,7 +60,7 @@ export class DeepgramTTSProvider implements TTSProvider {
             try {
               controller.error(error);
             } catch {
-              // Ignore late error after stream has already terminated.
+              // ignore late error after stream has already terminated.
             }
           };
 
@@ -71,7 +71,7 @@ export class DeepgramTTSProvider implements TTSProvider {
             try {
               socket.close();
             } catch {
-              // Best effort.
+              // best effort.
             }
             socket = null;
           };
@@ -94,7 +94,7 @@ export class DeepgramTTSProvider implements TTSProvider {
             headers: { Authorization: `Token ${apiKey}` },
           });
 
-          socket.on('unexpected-response', (_req, response) => {
+          socket.on('unexpected-response', (_request, response) => {
             const chunks: Buffer[] = [];
             response.on('data', (chunk) => {
               chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -189,8 +189,8 @@ export class DeepgramTTSProvider implements TTSProvider {
           socket.on('close', closeStream);
         },
         cancel() {
-          // Closing the stream from downstream (reader.cancel) should stop incoming websocket frames.
-          // The close handler on the socket will complete stream termination.
+          // closing the stream from downstream (reader.cancel) should stop incoming websocket frames.
+          // the close handler on the socket will complete stream termination.
         },
       }),
     );

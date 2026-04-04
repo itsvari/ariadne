@@ -1,3 +1,6 @@
+// iovalkey ships without type declarations. the runtime default export is a constructor
+// function that creates a valkey (redis-compatible) client instance. ownership: the
+// instance is created in the constructor and lives for the lifetime of this class.
 // @ts-ignore
 import Valkey from 'iovalkey';
 import {
@@ -53,11 +56,11 @@ export class SharedBeliefStore {
 
   async readBeliefStore(sessionId: string): Promise<BeliefStore> {
     await this.ensureConnected();
-    const raw = await this.valkey.get(this.beliefKey(sessionId));
-    if (!raw) {
+    const value = await this.valkey.get(this.beliefKey(sessionId));
+    if (!value) {
       return createEmptyBeliefStore();
     }
-    return BeliefStoreSchema.parse(JSON.parse(raw));
+    return BeliefStoreSchema.parse(JSON.parse(value));
   }
 
   async writeBeliefStore(sessionId: string, store: BeliefStore): Promise<void> {
@@ -82,12 +85,12 @@ export class SharedBeliefStore {
 
   async dequeueDirective(sessionId: string): Promise<Directive | null> {
     await this.ensureConnected();
-    const raw = await this.valkey.lpop(this.directivesKey(sessionId));
-    if (!raw) {
+    const value = await this.valkey.lpop(this.directivesKey(sessionId));
+    if (!value) {
       return null;
     }
 
-    const directive = DirectiveSchema.parse(JSON.parse(raw));
+    const directive = DirectiveSchema.parse(JSON.parse(value));
     await this.valkey.rpush(this.fulfilledKey(sessionId), JSON.stringify(directive));
     const store = await this.readBeliefStore(sessionId);
     await this.writeBeliefStore(sessionId, {
@@ -99,14 +102,14 @@ export class SharedBeliefStore {
 
   async getDirectives(sessionId: string): Promise<Directive[]> {
     await this.ensureConnected();
-    const raw = await this.valkey.lrange(this.directivesKey(sessionId), 0, -1);
-    return raw.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry)));
+    const entries = await this.valkey.lrange(this.directivesKey(sessionId), 0, -1);
+    return entries.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry)));
   }
 
   async getFulfilledDirectives(sessionId: string): Promise<Directive[]> {
     await this.ensureConnected();
-    const raw = await this.valkey.lrange(this.fulfilledKey(sessionId), 0, -1);
-    return raw.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry)));
+    const entries = await this.valkey.lrange(this.fulfilledKey(sessionId), 0, -1);
+    return entries.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry)));
   }
 
   async appendHistory(sessionId: string, utterance: Utterance): Promise<void> {
@@ -146,8 +149,8 @@ export class SharedBeliefStore {
 
   async getWorldState(sessionId: string): Promise<WorldState | null> {
     await this.ensureConnected();
-    const raw = await this.valkey.get(this.worldKey(sessionId));
-    return raw ? WorldStateSchema.parse(JSON.parse(raw)) : null;
+    const value = await this.valkey.get(this.worldKey(sessionId));
+    return value ? WorldStateSchema.parse(JSON.parse(value)) : null;
   }
 
   async clearSession(sessionId: string): Promise<void> {
@@ -181,11 +184,11 @@ export class SharedBeliefStore {
 
     const records = await Promise.all(
       archiveIds.map(async (archiveId: string) => {
-        const raw = await this.valkey.get(this.archiveKey(archiveId));
-        if (!raw) {
+        const value = await this.valkey.get(this.archiveKey(archiveId));
+        if (!value) {
           return null;
         }
-        const parsed = this.parseArchive(raw);
+        const parsed = this.parseArchive(value);
         return {
           archiveId: parsed.archiveId,
           sessionId: parsed.sessionId,
@@ -202,11 +205,11 @@ export class SharedBeliefStore {
 
   async readSessionArchive(archiveId: string): Promise<SessionArchiveSnapshot | null> {
     await this.ensureConnected();
-    const raw = await this.valkey.get(this.archiveKey(archiveId));
-    if (!raw) {
+    const value = await this.valkey.get(this.archiveKey(archiveId));
+    if (!value) {
       return null;
     }
-    return this.parseArchive(raw);
+    return this.parseArchive(value);
   }
 
   async disconnect(): Promise<void> {
@@ -220,7 +223,7 @@ export class SharedBeliefStore {
   }
 
   private async archiveSession(sessionId: string): Promise<string | null> {
-    const [beliefRaw, directivesRaw, fulfilledRaw, historyRaw, historySummary, worldRaw] = await Promise.all([
+    const [beliefValue, directivesValue, fulfilledValue, historyValue, historySummary, worldValue] = await Promise.all([
       this.valkey.get(this.beliefKey(sessionId)),
       this.valkey.lrange(this.directivesKey(sessionId), 0, -1),
       this.valkey.lrange(this.fulfilledKey(sessionId), 0, -1),
@@ -229,12 +232,12 @@ export class SharedBeliefStore {
       this.valkey.get(this.worldKey(sessionId)),
     ]);
 
-    const hasData = Boolean(beliefRaw)
-      || directivesRaw.length > 0
-      || fulfilledRaw.length > 0
-      || historyRaw.length > 0
+    const hasData = Boolean(beliefValue)
+      || directivesValue.length > 0
+      || fulfilledValue.length > 0
+      || historyValue.length > 0
       || Boolean(historySummary)
-      || Boolean(worldRaw);
+      || Boolean(worldValue);
 
     if (!hasData) {
       return null;
@@ -247,14 +250,14 @@ export class SharedBeliefStore {
       archiveId,
       sessionId,
       archivedAt,
-      beliefStore: beliefRaw
-        ? BeliefStoreSchema.parse(JSON.parse(beliefRaw))
+      beliefStore: beliefValue
+        ? BeliefStoreSchema.parse(JSON.parse(beliefValue))
         : createEmptyBeliefStore(),
-      directives: directivesRaw.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry))),
-      fulfilledDirectives: fulfilledRaw.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry))),
-      history: historyRaw.map((entry: string) => UtteranceSchema.parse(JSON.parse(entry))),
+      directives: directivesValue.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry))),
+      fulfilledDirectives: fulfilledValue.map((entry: string) => DirectiveSchema.parse(JSON.parse(entry))),
+      history: historyValue.map((entry: string) => UtteranceSchema.parse(JSON.parse(entry))),
       historySummary: historySummary || null,
-      worldState: worldRaw ? WorldStateSchema.parse(JSON.parse(worldRaw)) : null,
+      worldState: worldValue ? WorldStateSchema.parse(JSON.parse(worldValue)) : null,
     };
 
     await this.valkey.multi()
@@ -265,8 +268,8 @@ export class SharedBeliefStore {
     return archiveId;
   }
 
-  private parseArchive(raw: string): SessionArchiveSnapshot {
-    const parsed = JSON.parse(raw) as SessionArchiveSnapshot;
+  private parseArchive(value: string): SessionArchiveSnapshot {
+    const parsed = JSON.parse(value) as SessionArchiveSnapshot;
     return {
       archiveId: String(parsed.archiveId),
       sessionId: String(parsed.sessionId),

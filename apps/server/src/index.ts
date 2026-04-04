@@ -12,6 +12,7 @@ import { AriadneOrchestrator } from './orchestrator';
 const PORT = Number(process.env.PORT ?? 8081);
 const DISCOVERY_ENABLED = (process.env.DISCOVERY_ENABLED ?? 'true').toLowerCase() !== 'false';
 const DISCOVERY_PORT = Number(process.env.DISCOVERY_PORT ?? 9876);
+const MAX_REQUEST_BODY_SIZE = '10mb';
 
 interface DiscoveryRequest {
   type?: string;
@@ -35,7 +36,7 @@ async function bootstrap(): Promise<void> {
 
   const app = express();
   app.use(cors());
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: MAX_REQUEST_BODY_SIZE }));
 
   const server = http.createServer(app);
   const beliefStore = new SharedBeliefStore();
@@ -68,8 +69,8 @@ async function bootstrap(): Promise<void> {
     },
   });
 
-  app.get('/health', async (_req, res) => {
-    res.json({
+  app.get('/health', async (_request, response) => {
+    response.json({
       ok: true,
       valkey: await beliefStore.healthCheck(),
       openrouterConfigured: Boolean(process.env.OPENROUTER_API_KEY),
@@ -78,58 +79,58 @@ async function bootstrap(): Promise<void> {
     });
   });
 
-  app.post('/session/start', async (req, res) => {
+  app.post('/session/start', async (request, response) => {
     try {
-      const sessionId = String(req.body.sessionId || crypto.randomUUID());
-      const status = await orchestrator.startSession(sessionId, req.body.sessionConfig ?? {});
-      res.json(status);
+      const sessionId = String(request.body.sessionId || crypto.randomUUID());
+      const status = await orchestrator.startSession(sessionId, request.body.sessionConfig ?? {});
+      response.json(status);
     } catch (error) {
-      res.status(500).json({ error: toErrorMessage(error) });
+      response.status(500).json({ error: toErrorMessage(error) });
     }
   });
 
-  app.post('/session/stop', async (req, res) => {
+  app.post('/session/stop', async (request, response) => {
     try {
-      const sessionId = String(req.body.sessionId ?? '');
+      const sessionId = String(request.body.sessionId ?? '');
       const status = await orchestrator.stopSession(sessionId);
       if (!status) {
-        res.status(404).json({ error: 'Session not found' });
+        response.status(404).json({ error: 'Session not found' });
         return;
       }
-      res.json(status);
+      response.json(status);
     } catch (error) {
-      res.status(500).json({ error: toErrorMessage(error) });
+      response.status(500).json({ error: toErrorMessage(error) });
     }
   });
 
-  app.post('/utterance', async (req, res) => {
+  app.post('/utterance', async (request, response) => {
     try {
       await orchestrator.handleUtterance({
-        sessionId: String(req.body.sessionId),
-        text: String(req.body.text ?? ''),
-        speakerId: req.body.speakerId ? String(req.body.speakerId) : undefined,
+        sessionId: String(request.body.sessionId),
+        text: String(request.body.text ?? ''),
+        speakerId: request.body.speakerId ? String(request.body.speakerId) : undefined,
       });
-      res.json({ ok: true });
+      response.json({ ok: true });
     } catch (error) {
-      res.status(500).json({ error: toErrorMessage(error) });
+      response.status(500).json({ error: toErrorMessage(error) });
     }
   });
 
-  app.post('/utterance/audio', async (req, res) => {
+  app.post('/utterance/audio', async (request, response) => {
     try {
       if (!deepgram) {
-        res.status(503).json({ error: 'DEEPGRAM_API_KEY is not configured on the server.' });
+        response.status(503).json({ error: 'DEEPGRAM_API_KEY is not configured on the server.' });
         return;
       }
 
-      const sessionId = String(req.body.sessionId ?? '');
-      const speakerId = req.body.speakerId ? String(req.body.speakerId) : undefined;
-      const audioBase64 = String(req.body.audioBase64 ?? '');
-      const sampleRateHz = Number(req.body.sampleRateHz ?? 16000);
-      const channels = Number(req.body.channels ?? 1);
+      const sessionId = String(request.body.sessionId ?? '');
+      const speakerId = request.body.speakerId ? String(request.body.speakerId) : undefined;
+      const audioBase64 = String(request.body.audioBase64 ?? '');
+      const sampleRateHz = Number(request.body.sampleRateHz ?? 16000);
+      const channels = Number(request.body.channels ?? 1);
 
       if (!audioBase64) {
-        res.status(400).json({ error: 'No audio data received.' });
+        response.status(400).json({ error: 'No audio data received.' });
         return;
       }
 
@@ -139,103 +140,103 @@ async function bootstrap(): Promise<void> {
         channels,
       });
       if (!transcript) {
-        res.json({ ok: true, transcript: '' });
+        response.json({ ok: true, transcript: '' });
         return;
       }
 
       await orchestrator.handleUtterance({ sessionId, text: transcript, speakerId });
-      res.json({ ok: true, transcript });
+      response.json({ ok: true, transcript });
     } catch (error) {
-      res.status(500).json({ error: toErrorMessage(error) });
+      response.status(500).json({ error: toErrorMessage(error) });
     }
   });
 
-  app.post('/thinker/trigger', async (req, res) => {
+  app.post('/thinker/trigger', async (request, response) => {
     try {
-      await orchestrator.triggerThinker(String(req.body.sessionId), String(req.body.reason ?? 'manual'));
-      res.json({ ok: true });
+      await orchestrator.triggerThinker(String(request.body.sessionId), String(request.body.reason ?? 'manual'));
+      response.json({ ok: true });
     } catch (error) {
-      res.status(500).json({ error: toErrorMessage(error) });
+      response.status(500).json({ error: toErrorMessage(error) });
     }
   });
 
-  app.post('/world-state', async (req, res) => {
+  app.post('/world-state', async (request, response) => {
     try {
-      await orchestrator.handleWorldStateUpdate(String(req.body.sessionId), req.body.state);
-      res.json({ ok: true });
+      await orchestrator.handleWorldStateUpdate(String(request.body.sessionId), request.body.state);
+      response.json({ ok: true });
     } catch (error) {
-      res.status(500).json({ error: toErrorMessage(error) });
+      response.status(500).json({ error: toErrorMessage(error) });
     }
   });
 
-  app.get('/session/status', async (req, res) => {
+  app.get('/session/status', async (request, response) => {
     try {
-      const sessionId = req.query.sessionId ? String(req.query.sessionId) : undefined;
+      const sessionId = request.query.sessionId ? String(request.query.sessionId) : undefined;
       if (!sessionId) {
-        res.json({ sessions: orchestrator.listSessions() });
+        response.json({ sessions: orchestrator.listSessions() });
         return;
       }
-      res.json({ status: orchestrator.getSessionStatus(sessionId), events: orchestrator.getRecentEvents(sessionId) });
+      response.json({ status: orchestrator.getSessionStatus(sessionId), events: orchestrator.getRecentEvents(sessionId) });
     } catch (error) {
-      res.status(404).json({ error: toErrorMessage(error) });
+      response.status(404).json({ error: toErrorMessage(error) });
     }
   });
 
-  app.get('/belief-store', async (req, res) => {
+  app.get('/belief-store', async (request, response) => {
     try {
-      const sessionId = String(req.query.sessionId ?? '');
-      res.json(await beliefStore.readBeliefStore(sessionId));
+      const sessionId = String(request.query.sessionId ?? '');
+      response.json(await beliefStore.readBeliefStore(sessionId));
     } catch (error) {
-      res.status(500).json({ error: toErrorMessage(error) });
+      response.status(500).json({ error: toErrorMessage(error) });
     }
   });
 
-  app.get('/directives', async (req, res) => {
+  app.get('/directives', async (request, response) => {
     try {
-      const sessionId = String(req.query.sessionId ?? '');
-      res.json({
+      const sessionId = String(request.query.sessionId ?? '');
+      response.json({
         pending: await beliefStore.getDirectives(sessionId),
         fulfilled: await beliefStore.getFulfilledDirectives(sessionId),
       });
     } catch (error) {
-      res.status(500).json({ error: toErrorMessage(error) });
+      response.status(500).json({ error: toErrorMessage(error) });
     }
   });
 
-  app.get('/belief-store/archives', async (req, res) => {
+  app.get('/belief-store/archives', async (request, response) => {
     try {
-      const sessionId = String(req.query.sessionId ?? '');
+      const sessionId = String(request.query.sessionId ?? '');
       if (!sessionId) {
-        res.status(400).json({ error: 'sessionId is required' });
+        response.status(400).json({ error: 'sessionId is required' });
         return;
       }
 
-      res.json({
+      response.json({
         sessionId,
         archives: await beliefStore.listSessionArchives(sessionId),
       });
     } catch (error) {
-      res.status(500).json({ error: toErrorMessage(error) });
+      response.status(500).json({ error: toErrorMessage(error) });
     }
   });
 
-  app.get('/belief-store/archive', async (req, res) => {
+  app.get('/belief-store/archive', async (request, response) => {
     try {
-      const archiveId = String(req.query.archiveId ?? '');
+      const archiveId = String(request.query.archiveId ?? '');
       if (!archiveId) {
-        res.status(400).json({ error: 'archiveId is required' });
+        response.status(400).json({ error: 'archiveId is required' });
         return;
       }
 
       const archive = await beliefStore.readSessionArchive(archiveId);
       if (!archive) {
-        res.status(404).json({ error: 'Archive not found' });
+        response.status(404).json({ error: 'Archive not found' });
         return;
       }
 
-      res.json({ archive });
+      response.json({ archive });
     } catch (error) {
-      res.status(500).json({ error: toErrorMessage(error) });
+      response.status(500).json({ error: toErrorMessage(error) });
     }
   });
 
@@ -283,8 +284,8 @@ function startDiscoveryResponder(httpPort: number): () => void {
     console.warn(`[discovery] UDP responder error: ${toErrorMessage(error)}`);
   });
 
-  discoverySocket.on('message', (rawMessage, remoteInfo) => {
-    const request = parseDiscoveryRequest(rawMessage);
+  discoverySocket.on('message', (messageBytes, remoteInfo) => {
+    const request = parseDiscoveryRequest(messageBytes);
     if (!request || request.type !== 'ariadne.discover.request') {
       return;
     }
@@ -312,14 +313,14 @@ function startDiscoveryResponder(httpPort: number): () => void {
     try {
       discoverySocket.close();
     } catch {
-      // Best-effort cleanup on process shutdown.
+      // best-effort cleanup on process shutdown.
     }
   };
 }
 
-function parseDiscoveryRequest(rawMessage: Buffer): DiscoveryRequest | null {
+function parseDiscoveryRequest(messageBytes: Buffer): DiscoveryRequest | null {
   try {
-    return JSON.parse(rawMessage.toString('utf8')) as DiscoveryRequest;
+    return JSON.parse(messageBytes.toString('utf8')) as DiscoveryRequest;
   } catch {
     return null;
   }
