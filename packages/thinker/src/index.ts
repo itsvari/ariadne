@@ -13,6 +13,11 @@ import {
   type WorldState,
 } from '@ariadne/shared-contracts';
 
+const MAX_MESSAGE_SNIPPET_LENGTH = 240;
+const MAX_THINKER_TOKENS = 32_768;
+const THINKER_TEMPERATURE = 0.4;
+const MAX_THINKER_TOOL_STEPS = 4;
+
 const THINKER_SYSTEM_PROMPT = `You are Ariadne's strategic thinker.
 Analyze the full conversation, maintain the shared belief store, and queue crisp directives for the talker.
 Always prefer structured tool calls over freeform narration.
@@ -61,7 +66,7 @@ export async function runThinkerTurn(
     currentBeliefStore,
     model = process.env.OPENROUTER_MODEL ?? 'qwen/qwen3.6-plus:free',
     toolRuntime,
-    maxToolSteps = 4,
+    maxToolSteps = MAX_THINKER_TOOL_STEPS,
     onTelemetry,
   } = options;
 
@@ -114,8 +119,8 @@ export async function runThinkerTurn(
       model,
       tools: THINKER_TOOLS,
       toolChoice: 'auto',
-      maxTokens: 32768,
-      temperature: 0.4,
+      maxTokens: MAX_THINKER_TOKENS,
+      temperature: THINKER_TEMPERATURE,
       topP: 1,
       reasoningEffort: 'medium',
     });
@@ -159,7 +164,8 @@ export async function runThinkerTurn(
 
       executed = true;
       if (toolCall.function.name === 'write_belief_store') {
-        lastBeliefStore = BeliefStoreSchema.parse(JSON.parse(toolMessage.content ?? '{}'));
+        const storeValue = BeliefStoreSchema.parse(JSON.parse(toolMessage.content ?? '{}'));
+        lastBeliefStore = storeValue;
       }
       messages.push(toolMessage);
     }
@@ -222,14 +228,14 @@ async function executeThinkerToolCall(
   }
 }
 
-function decodeBeliefStoreArgument(rawStore: unknown, fallback: BeliefStore): BeliefStore {
-  const rawValue = parseMaybeJson(rawStore);
-  if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
+function decodeBeliefStoreArgument(storeValue: unknown, fallback: BeliefStore): BeliefStore {
+  const parsedValue = parseMaybeJson(storeValue);
+  if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) {
     return fallback;
   }
 
   const nowIso = new Date().toISOString();
-  const source = rawValue as Record<string, unknown>;
+  const source = parsedValue as Record<string, unknown>;
 
   const normalizedParticipants = Array.isArray(source.participants)
     ? source.participants
@@ -273,7 +279,7 @@ function decodeBeliefStoreArgument(rawStore: unknown, fallback: BeliefStore): Be
   return fallback;
 }
 
-function decodeDirectiveArgument(rawDirective: unknown): Directive {
+function decodeDirectiveArgument(directiveValue: unknown): Directive {
   const nowIso = new Date().toISOString();
   const defaultDirective: Directive = {
     id: crypto.randomUUID(),
@@ -282,10 +288,10 @@ function decodeDirectiveArgument(rawDirective: unknown): Directive {
     createdAt: nowIso,
   };
 
-  const parsedRawDirective = parseMaybeJson(rawDirective);
+  const parsedDirectiveValue = parseMaybeJson(directiveValue);
 
-  if (typeof parsedRawDirective === 'string') {
-    const instruction = parsedRawDirective.trim();
+  if (typeof parsedDirectiveValue === 'string') {
+    const instruction = parsedDirectiveValue.trim();
     if (!instruction) {
       return defaultDirective;
     }
@@ -295,11 +301,11 @@ function decodeDirectiveArgument(rawDirective: unknown): Directive {
     };
   }
 
-  if (!parsedRawDirective || typeof parsedRawDirective !== 'object' || Array.isArray(parsedRawDirective)) {
+  if (!parsedDirectiveValue || typeof parsedDirectiveValue !== 'object' || Array.isArray(parsedDirectiveValue)) {
     return defaultDirective;
   }
 
-  const candidate = parsedRawDirective as Record<string, unknown>;
+  const candidate = parsedDirectiveValue as Record<string, unknown>;
   const normalizedCandidate: Record<string, unknown> = {
     id: typeof candidate.id === 'string' ? candidate.id : defaultDirective.id,
     instruction:
@@ -342,10 +348,10 @@ function parseMaybeJson(value: unknown): unknown {
 }
 
 function normalizeParticipant(entry: unknown, index: number): Record<string, unknown> | null {
-  const parsedEntry = parseMaybeJson(entry);
+  const parsedValue = parseMaybeJson(entry);
 
-  if (typeof parsedEntry === 'string') {
-    const speakerId = parsedEntry.trim();
+  if (typeof parsedValue === 'string') {
+    const speakerId = parsedValue.trim();
     if (!speakerId) {
       return null;
     }
@@ -358,17 +364,20 @@ function normalizeParticipant(entry: unknown, index: number): Record<string, unk
     };
   }
 
-  if (!parsedEntry || typeof parsedEntry !== 'object' || Array.isArray(parsedEntry)) {
+  if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) {
     return null;
   }
 
-  const candidate = parsedEntry as Record<string, unknown>;
+  const candidate = parsedValue as Record<string, unknown>;
   const rawId = candidate.id;
   const participantId = typeof rawId === 'string'
-    ? rawId
+    ? rawId.trim() || null
     : typeof rawId === 'number'
       ? String(rawId)
       : `participant_${index + 1}`;
+  if (!participantId) {
+    return null;
+  }
 
   return {
     ...candidate,
@@ -377,10 +386,10 @@ function normalizeParticipant(entry: unknown, index: number): Record<string, unk
 }
 
 function normalizeDirective(entry: unknown, index: number, nowIso: string): Record<string, unknown> | null {
-  const parsedEntry = parseMaybeJson(entry);
+  const parsedValue = parseMaybeJson(entry);
 
-  if (typeof parsedEntry === 'string') {
-    const instruction = parsedEntry.trim();
+  if (typeof parsedValue === 'string') {
+    const instruction = parsedValue.trim();
     if (!instruction) {
       return null;
     }
@@ -392,11 +401,11 @@ function normalizeDirective(entry: unknown, index: number, nowIso: string): Reco
     };
   }
 
-  if (!parsedEntry || typeof parsedEntry !== 'object' || Array.isArray(parsedEntry)) {
+  if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) {
     return null;
   }
 
-  const candidate = parsedEntry as Record<string, unknown>;
+  const candidate = parsedValue as Record<string, unknown>;
   return {
     ...candidate,
     id: typeof candidate.id === 'string' ? candidate.id : `directive_${index + 1}_${Date.now()}`,
@@ -448,7 +457,9 @@ function getLastUserMessageSnippet(messages: ChatMessage[]): string | null {
     }
 
     const trimmed = message.content.trim();
-    return trimmed.length > 240 ? `${trimmed.slice(0, 240)}...<truncated>` : trimmed;
+    return trimmed.length > MAX_MESSAGE_SNIPPET_LENGTH
+      ? `${trimmed.slice(0, MAX_MESSAGE_SNIPPET_LENGTH)}...<truncated>`
+      : trimmed;
   }
 
   return null;

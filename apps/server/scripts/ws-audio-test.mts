@@ -30,7 +30,7 @@ let ttsChannels = 1;
 let ttsStarted = false;
 let finishRequested = false;
 let ttsIdleTimer: NodeJS.Timeout | null = null;
-const TTS_IDLE_MS = Number(process.env.TTS_IDLE_MS ?? 1800);
+const TTS_IDLE_TIMEOUT_MS = Number(process.env.TTS_IDLE_MS ?? 1800);
 
 const TIMEOUT_MS = 30_000;
 const timeout = setTimeout(() => {
@@ -40,14 +40,12 @@ const timeout = setTimeout(() => {
 
 function resetTtsIdleTimer() {
   if (ttsIdleTimer) clearTimeout(ttsIdleTimer);
-  // Some providers keep WS/session alive after last chunk.
-  // If chunk flow goes quiet after we already started TTS, finalize output.
   ttsIdleTimer = setTimeout(() => {
     if (ttsStarted && !finishRequested) {
-      console.log(`\nNo new TTS chunks for ${TTS_IDLE_MS}ms. Finalizing stream.`);
+      console.log(`\nNo new TTS chunks for ${TTS_IDLE_TIMEOUT_MS}ms. Finalizing stream.`);
       closeSession();
     }
-  }, TTS_IDLE_MS);
+  }, TTS_IDLE_TIMEOUT_MS);
 }
 
 function closeSession(exitCode = 0) {
@@ -91,21 +89,21 @@ ws.on('open', () => {
 });
 
 ws.on('message', (data) => {
-  const msg = JSON.parse(data.toString());
+  const message = JSON.parse(data.toString());
 
-  switch (msg.type) {
+  switch (message.type) {
     case 'tts.audio.start': {
-      ttsSampleRateHz = Number(msg.payload?.sampleRateHz ?? 24000);
-      ttsChannels = Number(msg.payload?.channels ?? 1);
+      ttsSampleRateHz = Number(message.payload?.sampleRateHz ?? 24000);
+      ttsChannels = Number(message.payload?.channels ?? 1);
       console.log(`\nTTS stream metadata: linear16 ${ttsSampleRateHz}Hz ${ttsChannels}ch`);
       break;
     }
 
     case 'talker.output': {
-      const calls = msg.payload?.tool_calls;
-      if (Array.isArray(calls)) {
-        for (const tc of calls) {
-          const fn = tc.function;
+      const toolCalls = message.payload?.tool_calls;
+      if (Array.isArray(toolCalls)) {
+        for (const toolCall of toolCalls) {
+          const fn = toolCall.function;
           if (fn?.name === 'speak') {
             const args = JSON.parse(fn.arguments ?? '{}');
             console.log(`\nTalker will speak: "${args.text}"`);
@@ -114,15 +112,15 @@ ws.on('message', (data) => {
             console.log(`\nTalker avatar command: ${args.command}`);
           }
         }
-        const hasSpeakCall = calls.some(
-          (tc: { function?: { name?: string } }) => tc.function?.name === 'speak',
+        const hasSpeakCall = toolCalls.some(
+          (toolCall: { function?: { name?: string } }) => toolCall.function?.name === 'speak',
         );
         if (!hasSpeakCall) {
           console.log('\nTalker chose not to speak (no speak tool call). No audio to play.');
           closeSession();
         }
-      } else if (msg.payload?.content) {
-        console.log(`\nTalker content: "${msg.payload.content}"`);
+      } else if (message.payload?.content) {
+        console.log(`\nTalker content: "${message.payload.content}"`);
         console.log('No tool calls, so no TTS audio will follow.');
         closeSession();
       } else {
@@ -137,29 +135,29 @@ ws.on('message', (data) => {
         ttsStarted = true;
         console.log('\nReceiving TTS audio chunks...');
       }
-      const b64 = msg.payload?.audioBase64;
+      const b64 = message.payload?.audioBase64;
       if (b64) {
         audioChunks.push(Buffer.from(b64, 'base64'));
-        process.stdout.write(`  chunk ${msg.payload.seq} (${audioChunks[audioChunks.length - 1].length} bytes)\r`);
+        process.stdout.write(`  chunk ${message.payload.seq} (${audioChunks[audioChunks.length - 1].length} bytes)\r`);
         resetTtsIdleTimer();
       }
       break;
     }
 
     case 'tts.audio.done': {
-      console.log(`\nTTS stream complete (${msg.payload?.totalChunks ?? '?'} chunks).`);
+      console.log(`\nTTS stream complete (${message.payload?.totalChunks ?? '?'} chunks).`);
       closeSession();
       break;
     }
 
     case 'avatar.command': {
-      const cmd = msg.payload?.command ?? 'unknown';
-      console.log(`Avatar command: ${cmd}`);
+      const command = message.payload?.command ?? 'unknown';
+      console.log(`Avatar command: ${command}`);
       break;
     }
 
     case 'error': {
-      console.error('Server error:', msg.payload?.error);
+      console.error('Server error:', message.payload?.error);
       closeSession(1);
       break;
     }
@@ -189,7 +187,7 @@ ws.on('close', () => {
   }
 });
 
-ws.on('error', (err) => {
-  console.error('WebSocket error:', err.message);
+ws.on('error', (error) => {
+  console.error('WebSocket error:', error.message);
   closeSession(1);
 });

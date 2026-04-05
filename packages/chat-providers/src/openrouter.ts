@@ -37,7 +37,7 @@ export class OpenRouterChatProvider implements ChatProvider {
   }
 
   async complete(params: ChatCompletionParams): Promise<ChatCompletionResult> {
-    const raw = (await this.client.chat.completions.create({
+    const responseValue = (await this.client.chat.completions.create({
       model: params.model,
       messages: params.messages as Parameters<typeof this.client.chat.completions.create>[0]['messages'],
       tools: params.tools,
@@ -47,7 +47,7 @@ export class OpenRouterChatProvider implements ChatProvider {
       top_p: params.topP,
     })) as unknown as OpenRouterResponse;
 
-    const message = raw.choices?.[0]?.message;
+    const message = responseValue.choices?.[0]?.message;
     if (!message) {
       throw new Error('OpenRouter returned no assistant message');
     }
@@ -61,7 +61,7 @@ export class OpenRouterChatProvider implements ChatProvider {
     return {
       content,
       tool_calls: message.tool_calls,
-      raw,
+      raw: responseValue,
     };
   }
 }

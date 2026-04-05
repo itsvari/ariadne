@@ -13,6 +13,11 @@ import {
   type WorldState,
 } from '@ariadne/shared-contracts';
 
+const MAX_MESSAGE_SNIPPET_LENGTH = 240;
+const MAX_TALKER_TOKENS = 32_768;
+const TALKER_TEMPERATURE = 0.7;
+const MAX_TALKER_TOOL_STEPS = 4;
+
 const SYSTEM_PROMPTS: Record<InterventionMode, string> = {
   control: `You are Ariadne, a concise discussion facilitator in a VR world.
 Output plain spoken text only.
@@ -86,7 +91,7 @@ export async function runTalkerTurn(
     request,
     model = process.env.OPENROUTER_MODEL ?? 'qwen/qwen3.6-plus:free',
     toolRuntime,
-    maxToolSteps = 4,
+    maxToolSteps = MAX_TALKER_TOOL_STEPS,
     onTelemetry,
   } = options;
 
@@ -114,8 +119,8 @@ export async function runTalkerTurn(
       model,
       tools: TALKER_TOOLS,
       toolChoice: 'auto',
-      maxTokens: 32768,
-      temperature: 0.7,
+      maxTokens: MAX_TALKER_TOKENS,
+      temperature: TALKER_TEMPERATURE,
       topP: 1,
       reasoningEffort: 'low',
     });
@@ -164,7 +169,6 @@ export async function runTalkerTurn(
       executedAnyTool = true;
       currentMessages.push(toolMessage);
 
-      // End this turn as soon as the model has already taken a user-facing action.
       if (toolCall.function.name === 'speak' || toolCall.function.name === 'avatar_command') {
         terminalToolUsed = true;
       }
@@ -295,7 +299,9 @@ function getLastUserMessageSnippet(messages: ChatMessage[]): string | null {
     }
 
     const trimmed = message.content.trim();
-    return trimmed.length > 240 ? `${trimmed.slice(0, 240)}...<truncated>` : trimmed;
+    return trimmed.length > MAX_MESSAGE_SNIPPET_LENGTH
+      ? `${trimmed.slice(0, MAX_MESSAGE_SNIPPET_LENGTH)}...<truncated>`
+      : trimmed;
   }
 
   return null;

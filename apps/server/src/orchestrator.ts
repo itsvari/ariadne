@@ -1,7 +1,8 @@
 import type { Server as HttpServer } from 'http';
 import { createWriteStream, mkdirSync, type WriteStream } from 'fs';
 import { dirname, resolve } from 'path';
-import WebSocket, { WebSocketServer } from 'ws';
+import WS, { WebSocketServer, WebSocket } from 'ws';
+import { DeepgramClient } from '@deepgram/sdk';
 import { EventBus } from '@ariadne/event-bus';
 import {
   OpenRouterChatProvider,
@@ -25,6 +26,13 @@ import {
 import { runTalkerTurn } from '@ariadne/talker';
 import { runThinkerTurn, startThinkerScheduler, type ThinkerSchedulerControls } from '@ariadne/thinker';
 import { DeepgramTTSProvider } from '@ariadne/tts-client';
+
+const MAX_RECENT_EVENTS = 99;
+const MAX_LOG_PREVIEW_LENGTH = 700;
+const DEFAULT_TALKER_HISTORY_TURNS = 10;
+const TTS_ENCODING = 'linear16';
+const TTS_SAMPLE_RATE_HZ = 24_000;
+const TTS_CHANNELS = 1;
 
 export interface SessionStatus {
   sessionId: string;
@@ -53,6 +61,26 @@ interface SocketAudioBufferState {
   speakerId?: string;
 }
 
+type V2Socket = Awaited<ReturnType<DeepgramClient['listen']['v2']['connect']>>;
+
+interface DeepgramLiveConnection {
+  connection: V2Socket;
+  sampleRateHz: number;
+  channels: number;
+  interimTranscript: string;
+  endOfTurnPromise: Promise<string | null>;
+  resolveEndOfTurn: (transcript: string | null) => void;
+}
+
+interface SocketStreamingState {
+  sessionId: string;
+  connectionsBySpeaker: Map<string, DeepgramLiveConnection>;
+  sampleRateHz: number;
+  channels: number;
+  speakerId?: string;
+  finalizedTranscripts: Map<string, string[]>;
+}
+
 type StreamReader = ReturnType<ReadableStream<Uint8Array>['getReader']>;
 
 interface ActiveSpeechState {
@@ -79,6 +107,7 @@ export interface AriadneOrchestratorOptions {
   talkerProvider?: ChatProvider;
   thinkerProvider?: ChatProvider;
   ttsProvider?: DeepgramTTSProvider;
+  deepgramApiKey?: string;
   transcribeAudio?: (input: {
     audioBuffer: Buffer;
     sampleRateHz: number;
@@ -90,17 +119,20 @@ export class AriadneOrchestrator {
   private sessions = new Map<string, SessionState>();
   private socketClientMetadata = new WeakMap<WebSocket, SocketClientMetadata>();
   private socketAudioBuffers = new WeakMap<WebSocket, SocketAudioBufferState>();
+  private socketStreamingStates = new WeakMap<WebSocket, SocketStreamingState>();
   private bus = new EventBus();
   private wsServer: WebSocketServer;
   private beliefStore: SharedBeliefStore;
   private talkerProvider: ChatProvider;
   private thinkerProvider: ChatProvider;
   private ttsProvider: DeepgramTTSProvider;
+  private deepgramClient: DeepgramClient | undefined;
+  private deepgramApiKey?: string;
   private transcribeAudio?: AriadneOrchestratorOptions['transcribeAudio'];
   private readonly logSystemEvents = (process.env.LOG_SYSTEM_EVENTS ?? 'true').toLowerCase() !== 'false';
   private readonly logSystemEventsToFile = (process.env.LOG_SYSTEM_EVENTS_TO_FILE ?? 'true').toLowerCase() !== 'false';
   private readonly systemEventsLogFilePath = process.env.LOG_SYSTEM_EVENTS_FILE?.trim() || 'logs/system-events.ndjson';
-  private readonly talkerHistoryTurns = this.parsePositiveInteger(process.env.TALKER_CONTEXT_TURNS, 10);
+  private readonly talkerHistoryTurns = this.parsePositiveInteger(process.env.TALKER_CONTEXT_TURNS, DEFAULT_TALKER_HISTORY_TURNS);
   private systemEventsLogStream?: WriteStream;
 
   private static readonly SUPPRESSED_LOG_EVENT_TYPES = new Set([
@@ -115,6 +147,10 @@ export class AriadneOrchestrator {
     this.talkerProvider = options.talkerProvider ?? new CerebrasChatProvider();
     this.thinkerProvider = options.thinkerProvider ?? new OpenRouterChatProvider();
     this.ttsProvider = options.ttsProvider ?? new DeepgramTTSProvider();
+    this.deepgramApiKey = options.deepgramApiKey ?? process.env.DEEPGRAM_API_KEY;
+    if (this.deepgramApiKey) {
+      this.deepgramClient = new DeepgramClient({ apiKey: this.deepgramApiKey });
+    }
     this.transcribeAudio = options.transcribeAudio;
     this.systemEventsLogStream = this.createSystemEventsLogStream();
 
@@ -262,116 +298,148 @@ export class AriadneOrchestrator {
     this.broadcast(sessionId, 'session.status', this.serializeSession(session));
     const thinkerRunStartedAtIso = new Date().toISOString();
 
-    session.thinkerRunInFlight = (async () => {
-      try {
-        const history = await this.beliefStore.getHistory(sessionId);
-        const worldState = await this.beliefStore.getWorldState(sessionId);
-        const currentBeliefStore = await this.beliefStore.readBeliefStore(sessionId);
-
-        const result = await runThinkerTurn({
-          provider: this.thinkerProvider,
-          sessionId,
-          fullHistory: history,
-          worldState,
-          currentBeliefStore,
-          model: process.env.OPENROUTER_THINKER_MODEL ?? 'qwen/qwen3.6-plus:free',
-          toolRuntime: {
-            write_belief_store: async ({ store }) => {
-              const nextStore = store ?? currentBeliefStore;
-              await this.beliefStore.writeBeliefStore(sessionId, nextStore);
-              return nextStore;
-            },
-            enqueue_directive: async ({ directive }) => {
-              if (!directive) {
-                return null;
-              }
-              await this.beliefStore.enqueueDirective(sessionId, directive);
-              return directive;
-            },
-            read_world_state: async () => this.beliefStore.getWorldState(sessionId),
-            compact_history: async ({ summary }) => {
-              const nextSummary = summary?.trim() || currentBeliefStore.conversation_summary || 'No summary yet.';
-              await this.beliefStore.compactHistory(sessionId, nextSummary);
-              return { compacted: true, summary: nextSummary };
-            },
-            avatar_command: async (args) => {
-              await this.bus.publish({
-                type: 'AvatarCommand',
-                sessionId,
-                timestamp: new Date().toISOString(),
-                payload: { ...args, priority: 'planned' },
-              });
-              this.broadcast(sessionId, 'avatar.command', { ...args, priority: 'planned' });
-              return { queued: true };
-            },
-          },
-          onTelemetry: (event) => {
-            this.broadcast(sessionId, 'telemetry', event);
-          },
-        });
-
-        session.lastThinkerRunAt = new Date().toISOString();
-        session.thinkerStatus = session.active ? 'scheduled' : 'idle';
-        session.lastActivityAt = session.lastThinkerRunAt;
-        await this.bus.publish({
-          type: 'ReasonerComplete',
-          sessionId,
-          timestamp: session.lastThinkerRunAt,
-          payload: { reason, directiveCount: result.directives.length },
-        });
-
-        this.broadcast(sessionId, 'reasoner.complete', {
-          reason,
-          directiveCount: result.directives.length,
-          updatedBeliefStore: result.updatedBeliefStore,
-        });
-        this.broadcast(sessionId, 'session.status', this.serializeSession(session));
-
-        if (session.active && session.talkerStatus === 'idle' && result.directives.length > 0) {
-          const latestHistory = await this.beliefStore.getHistory(sessionId, 4);
-          const latestUserUtterance = [...latestHistory]
-            .reverse()
-            .find((entry) => entry.role === 'user');
-
-          const conversationMovedOn = Boolean(
-            latestUserUtterance
-              && Date.parse(latestUserUtterance.timestamp) > Date.parse(thinkerRunStartedAtIso),
-          );
-
-          if (conversationMovedOn) {
-            this.broadcast(sessionId, 'telemetry', {
-              type: 'reasoner.skip_talker_stale_directives',
-              sessionId,
-              directiveCount: result.directives.length,
-              reason,
-              thinkerRunStartedAt: thinkerRunStartedAtIso,
-              latestUserUtteranceAt: latestUserUtterance?.timestamp,
-            });
-          } else {
-            this.broadcast(sessionId, 'telemetry', {
-              type: 'reasoner.trigger_talker',
-              sessionId,
-              directiveCount: result.directives.length,
-              reason,
-            });
-            await this.scheduleTalker(sessionId);
-          }
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Thinker invocation failed';
-        console.error(`[thinker] session ${sessionId} failed:`, error);
-        session.thinkerStatus = session.active ? 'scheduled' : 'idle';
-        session.lastActivityAt = new Date().toISOString();
-        this.broadcast(sessionId, 'error', { message });
-        this.broadcast(sessionId, 'session.status', this.serializeSession(session));
-        throw error;
-      } finally {
-        session.thinkerRunInFlight = undefined;
-      }
-    })();
+    session.thinkerRunInFlight = this.executeThinkerTurn(sessionId, reason, thinkerRunStartedAtIso);
 
     await session.thinkerRunInFlight;
     return { ok: true };
+  }
+
+  private async executeThinkerTurn(sessionId: string, reason: string, thinkerRunStartedAtIso: string): Promise<void> {
+    const session = this.getRequiredSession(sessionId);
+
+    try {
+      const history = await this.beliefStore.getHistory(sessionId);
+      const worldState = await this.beliefStore.getWorldState(sessionId);
+      const currentBeliefStore = await this.beliefStore.readBeliefStore(sessionId);
+
+      const result = await runThinkerTurn({
+        provider: this.thinkerProvider,
+        sessionId,
+        fullHistory: history,
+        worldState,
+        currentBeliefStore,
+        model: process.env.OPENROUTER_THINKER_MODEL ?? 'qwen/qwen3.6-plus:free',
+        toolRuntime: {
+          write_belief_store: async ({ store }) => {
+            const nextStore = store ?? currentBeliefStore;
+            await this.beliefStore.writeBeliefStore(sessionId, nextStore);
+            return nextStore;
+          },
+          enqueue_directive: async ({ directive }) => {
+            if (!directive) {
+              return null;
+            }
+            await this.beliefStore.enqueueDirective(sessionId, directive);
+            return directive;
+          },
+          read_world_state: async () => this.beliefStore.getWorldState(sessionId),
+          compact_history: async ({ summary }) => {
+            const nextSummary = summary?.trim() || currentBeliefStore.conversation_summary || 'No summary yet.';
+            await this.beliefStore.compactHistory(sessionId, nextSummary);
+            return { compacted: true, summary: nextSummary };
+          },
+          avatar_command: async (args) => {
+            await this.bus.publish({
+              type: 'AvatarCommand',
+              sessionId,
+              timestamp: new Date().toISOString(),
+              payload: { ...args, priority: 'planned' },
+            });
+            this.broadcast(sessionId, 'avatar.command', { ...args, priority: 'planned' });
+            return { queued: true };
+          },
+        },
+        onTelemetry: (event) => {
+          this.broadcast(sessionId, 'telemetry', event);
+        },
+      });
+
+      await this.handleThinkerCompletion(sessionId, reason, thinkerRunStartedAtIso, result);
+    } catch (error) {
+      this.handleThinkerError(sessionId, error);
+      throw error;
+    } finally {
+      session.thinkerRunInFlight = undefined;
+    }
+  }
+
+  private async handleThinkerCompletion(
+    sessionId: string,
+    reason: string,
+    thinkerRunStartedAtIso: string,
+    result: { directives: Array<{ id: string }>; updatedBeliefStore: unknown },
+  ): Promise<void> {
+    const session = this.getRequiredSession(sessionId);
+
+    session.lastThinkerRunAt = new Date().toISOString();
+    session.thinkerStatus = session.active ? 'scheduled' : 'idle';
+    session.lastActivityAt = session.lastThinkerRunAt;
+    await this.bus.publish({
+      type: 'ReasonerComplete',
+      sessionId,
+      timestamp: session.lastThinkerRunAt,
+      payload: { reason, directiveCount: result.directives.length },
+    });
+
+    this.broadcast(sessionId, 'reasoner.complete', {
+      reason,
+      directiveCount: result.directives.length,
+      updatedBeliefStore: result.updatedBeliefStore,
+    });
+    this.broadcast(sessionId, 'session.status', this.serializeSession(session));
+
+    if (!session.active || session.talkerStatus !== 'idle' || result.directives.length === 0) {
+      return;
+    }
+
+    await this.maybeTriggerTalkerForDirectives(sessionId, reason, thinkerRunStartedAtIso, result.directives.length);
+  }
+
+  private async maybeTriggerTalkerForDirectives(
+    sessionId: string,
+    reason: string,
+    thinkerRunStartedAtIso: string,
+    directiveCount: number,
+  ): Promise<void> {
+    const latestHistory = await this.beliefStore.getHistory(sessionId, 4);
+    const latestUserUtterance = [...latestHistory]
+      .reverse()
+      .find((entry) => entry.role === 'user');
+
+    const conversationMovedOn = Boolean(
+      latestUserUtterance
+        && Date.parse(latestUserUtterance.timestamp) > Date.parse(thinkerRunStartedAtIso),
+    );
+
+    if (conversationMovedOn) {
+      this.broadcast(sessionId, 'telemetry', {
+        type: 'reasoner.skip_talker_stale_directives',
+        sessionId,
+        directiveCount,
+        reason,
+        thinkerRunStartedAt: thinkerRunStartedAtIso,
+        latestUserUtteranceAt: latestUserUtterance?.timestamp,
+      });
+      return;
+    }
+
+    this.broadcast(sessionId, 'telemetry', {
+      type: 'reasoner.trigger_talker',
+      sessionId,
+      directiveCount,
+      reason,
+    });
+    await this.scheduleTalker(sessionId);
+  }
+
+  private handleThinkerError(sessionId: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : 'Thinker invocation failed';
+    console.error(`[thinker] session ${sessionId} failed:`, error);
+    const session = this.getRequiredSession(sessionId);
+    session.thinkerStatus = session.active ? 'scheduled' : 'idle';
+    session.lastActivityAt = new Date().toISOString();
+    this.broadcast(sessionId, 'error', { message });
+    this.broadcast(sessionId, 'session.status', this.serializeSession(session));
   }
 
   private async scheduleTalker(sessionId: string): Promise<void> {
@@ -401,7 +469,6 @@ export class AriadneOrchestrator {
     this.broadcast(sessionId, 'session.status', this.serializeSession(session));
 
     try {
-      // A conversational turn is roughly user+assistant, so fetch 2x utterances.
       const history = await this.beliefStore.getHistory(sessionId, this.talkerHistoryTurns * 2);
       const beliefSnapshot = await this.beliefStore.readBeliefStore(sessionId);
       const directives = await this.beliefStore.getDirectives(sessionId);
@@ -420,80 +487,13 @@ export class AriadneOrchestrator {
         provider: this.talkerProvider,
         request,
         model: process.env.CEREBRAS_TALKER_MODEL ?? 'gpt-oss-120b',
-        toolRuntime: {
-          speak: async ({ text }) => {
-            return this.emitSpokenResponse(sessionId, text?.trim() ?? '');
-          },
-          avatar_command: async (args) => {
-            await this.bus.publish({
-              type: 'AvatarCommand',
-              sessionId,
-              timestamp: new Date().toISOString(),
-              payload: { ...args, priority: 'reactive' },
-            });
-            this.broadcast(sessionId, 'avatar.command', { ...args, priority: 'reactive' });
-            return { ok: true };
-          },
-          trigger_reasoner: async ({ reason }) => {
-            await this.bus.publish({
-              type: 'TalkerWaitFlag',
-              sessionId,
-              timestamp: new Date().toISOString(),
-              payload: { reason: reason ?? 'Talker requested help' },
-            });
-            void this.triggerThinker(sessionId, reason ?? 'talker_trigger').catch((error: unknown) => {
-              const message = error instanceof Error ? error.message : 'Thinker invocation failed';
-              console.error(`[thinker] background trigger failed for session ${sessionId}:`, error);
-              this.broadcast(sessionId, 'error', { message });
-            });
-            return { triggered: true };
-          },
-          wait_for_reasoner: async ({ reason }) => {
-            session.talkerStatus = 'waiting';
-            this.broadcast(sessionId, 'session.status', this.serializeSession(session));
-            await this.triggerThinker(sessionId, reason ?? 'talker_wait');
-            return {
-              beliefStore: await this.beliefStore.readBeliefStore(sessionId),
-              directives: await this.beliefStore.getDirectives(sessionId),
-            };
-          },
-          read_belief_store: async () => this.beliefStore.readBeliefStore(sessionId),
-          dequeue_directive: async () => this.beliefStore.dequeueDirective(sessionId),
-        },
+        toolRuntime: this.buildTalkerToolRuntime(sessionId, session),
         onTelemetry: (event) => {
           this.broadcast(sessionId, 'telemetry', event);
         },
       });
 
-      const normalizedContent = result.content?.trim() ?? '';
-      const hasSpeakToolCall = Boolean(
-        result.tool_calls?.some((toolCall) => toolCall.function.name === 'speak'),
-      );
-      const looksLikeToolMarkup = /^\[[a-z_]+\s*/i.test(normalizedContent);
-      const isNoResponseSentinel = normalizedContent.toLowerCase() === '(no response)';
-      const shouldFallbackSpeak =
-        normalizedContent.length > 0 && !hasSpeakToolCall && !looksLikeToolMarkup && !isNoResponseSentinel;
-
-      if (shouldFallbackSpeak) {
-        await this.emitSpokenResponse(sessionId, normalizedContent);
-        this.broadcast(sessionId, 'telemetry', {
-          type: 'talker.fallback_speak',
-          sessionId,
-          textLength: normalizedContent.length,
-        });
-      }
-
-      if (result.content && !shouldFallbackSpeak) {
-        const utterance: Utterance = {
-          id: crypto.randomUUID(),
-          role: 'system',
-          text: result.content,
-          timestamp: new Date().toISOString(),
-        };
-        await this.beliefStore.appendHistory(sessionId, utterance);
-      }
-
-      this.broadcast(sessionId, 'talker.output', result);
+      await this.handleTalkerCompletion(sessionId, result);
     } catch (error) {
       console.error(`[talker] session ${sessionId} failed:`, error);
       this.broadcast(sessionId, 'error', {
@@ -505,6 +505,84 @@ export class AriadneOrchestrator {
       session.lastActivityAt = new Date().toISOString();
       this.broadcast(sessionId, 'session.status', this.serializeSession(session));
     }
+  }
+
+  private buildTalkerToolRuntime(sessionId: string, session: SessionState) {
+    return {
+      speak: async ({ text }: { text?: string }) => {
+        return this.emitSpokenResponse(sessionId, text?.trim() ?? '');
+      },
+      avatar_command: async (args: Record<string, unknown>) => {
+        await this.bus.publish({
+          type: 'AvatarCommand',
+          sessionId,
+          timestamp: new Date().toISOString(),
+          payload: { ...args, priority: 'reactive' },
+        });
+        this.broadcast(sessionId, 'avatar.command', { ...args, priority: 'reactive' });
+        return { ok: true };
+      },
+      trigger_reasoner: async ({ reason }: { reason?: string }) => {
+        await this.bus.publish({
+          type: 'TalkerWaitFlag',
+          sessionId,
+          timestamp: new Date().toISOString(),
+          payload: { reason: reason ?? 'Talker requested help' },
+        });
+        void this.triggerThinker(sessionId, reason ?? 'talker_trigger').catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : 'Thinker invocation failed';
+          console.error(`[thinker] background trigger failed for session ${sessionId}:`, error);
+          this.broadcast(sessionId, 'error', { message });
+        });
+        return { triggered: true };
+      },
+      wait_for_reasoner: async ({ reason }: { reason?: string }) => {
+        session.talkerStatus = 'waiting';
+        this.broadcast(sessionId, 'session.status', this.serializeSession(session));
+        await this.triggerThinker(sessionId, reason ?? 'talker_wait');
+        return {
+          beliefStore: await this.beliefStore.readBeliefStore(sessionId),
+          directives: await this.beliefStore.getDirectives(sessionId),
+        };
+      },
+      read_belief_store: async () => this.beliefStore.readBeliefStore(sessionId),
+      dequeue_directive: async () => this.beliefStore.dequeueDirective(sessionId),
+    };
+  }
+
+  private async handleTalkerCompletion(
+    sessionId: string,
+    result: { content?: string | null; tool_calls?: Array<{ function: { name: string } }> },
+  ): Promise<void> {
+    const normalizedContent = result.content?.trim() ?? '';
+    const hasSpeakToolCall = Boolean(
+      result.tool_calls?.some((toolCall) => toolCall.function.name === 'speak'),
+    );
+    const looksLikeToolMarkup = /^\[[a-z_]+\s*/i.test(normalizedContent);
+    const isNoResponseSentinel = normalizedContent.toLowerCase() === '(no response)';
+    const shouldFallbackSpeak =
+      normalizedContent.length > 0 && !hasSpeakToolCall && !looksLikeToolMarkup && !isNoResponseSentinel;
+
+    if (shouldFallbackSpeak) {
+      await this.emitSpokenResponse(sessionId, normalizedContent);
+      this.broadcast(sessionId, 'telemetry', {
+        type: 'talker.fallback_speak',
+        sessionId,
+        textLength: normalizedContent.length,
+      });
+    }
+
+    if (result.content && !shouldFallbackSpeak) {
+      const utterance: Utterance = {
+        id: crypto.randomUUID(),
+        role: 'system',
+        text: result.content,
+        timestamp: new Date().toISOString(),
+      };
+      await this.beliefStore.appendHistory(sessionId, utterance);
+    }
+
+    this.broadcast(sessionId, 'talker.output', result);
   }
 
   private async emitSpokenResponse(sessionId: string, spokenText: string): Promise<{ spoken: boolean; text?: string }> {
@@ -532,19 +610,15 @@ export class AriadneOrchestrator {
     await this.beliefStore.appendHistory(sessionId, utterance);
     this.broadcast(sessionId, 'speak', { text: normalized });
 
-    const ttsEncoding = 'linear16';
-    const ttsSampleRateHz = 24000;
-    const ttsChannels = 1;
-
     this.broadcast(sessionId, 'tts.audio.start', {
-      encoding: ttsEncoding,
-      sampleRateHz: ttsSampleRateHz,
-      channels: ttsChannels,
+      encoding: TTS_ENCODING,
+      sampleRateHz: TTS_SAMPLE_RATE_HZ,
+      channels: TTS_CHANNELS,
     });
 
     const audio = await this.ttsProvider.synthesize(normalized, {
       format: 'pcm',
-      sampleRate: ttsSampleRateHz,
+      sampleRate: TTS_SAMPLE_RATE_HZ,
     });
     const reader = audio.getReader();
     speechState.reader = reader;
@@ -563,9 +637,9 @@ export class AriadneOrchestrator {
 
         this.broadcast(sessionId, 'tts.audio.chunk', {
           seq: sequence,
-          encoding: ttsEncoding,
-          sampleRateHz: ttsSampleRateHz,
-          channels: ttsChannels,
+          encoding: TTS_ENCODING,
+          sampleRateHz: TTS_SAMPLE_RATE_HZ,
+          channels: TTS_CHANNELS,
           audioBase64: Buffer.from(value).toString('base64'),
         });
         sequence += 1;
@@ -602,7 +676,7 @@ export class AriadneOrchestrator {
 
     if (speechState.reader) {
       void speechState.reader.cancel(reason).catch(() => {
-        // Best-effort cancellation of active stream reader.
+        // best-effort cancellation of active stream reader.
       });
     }
   }
@@ -669,6 +743,7 @@ export class AriadneOrchestrator {
     socket.on('close', () => {
       session.sockets.delete(socket);
       this.socketAudioBuffers.delete(socket);
+      this.cleanupStreamingState(socket);
 
       const metadata = this.socketClientMetadata.get(socket);
       this.socketClientMetadata.delete(socket);
@@ -694,7 +769,7 @@ export class AriadneOrchestrator {
     try {
       message = ClientWsMessageSchema.parse(JSON.parse(rawText));
     } catch {
-      this.logClientSocketMessage(sessionId, 'client.invalid', { rawText: this.truncateForLog(rawText, 700) });
+      this.logClientSocketMessage(sessionId, 'client.invalid', { rawText: this.truncateForLog(rawText, MAX_LOG_PREVIEW_LENGTH) });
       this.sendSocketMessage(socket, {
         type: 'error',
         sessionId,
@@ -748,12 +823,20 @@ export class AriadneOrchestrator {
     }
 
     if (message.type === 'client.audio.chunk') {
-      this.bufferAudioChunk(socket, message.payload);
+      if (this.deepgramApiKey) {
+        await this.streamAudioChunk(socket, sessionId, message.payload);
+      } else {
+        this.bufferAudioChunk(socket, message.payload);
+      }
       return;
     }
 
     if (message.type === 'client.audio.commit') {
-      await this.flushBufferedAudioToUtterance(socket, sessionId, message.payload ?? {});
+      if (this.deepgramApiKey) {
+        await this.finalizeStreamingAudio(socket, sessionId, message.payload ?? {});
+      } else {
+        await this.flushBufferedAudioToUtterance(socket, sessionId, message.payload ?? {});
+      }
     }
   }
 
@@ -943,7 +1026,7 @@ export class AriadneOrchestrator {
 
     this.logEventMessage(message, session.sockets.size);
 
-    session.events = [...session.events.slice(-99), message];
+    session.events = [...session.events.slice(-MAX_RECENT_EVENTS), message];
     for (const socket of session.sockets) {
       this.sendSocketMessage(socket, message, 'broadcast');
     }
@@ -1026,8 +1109,8 @@ export class AriadneOrchestrator {
       if (!serialized) {
         return 'null';
       }
-      if (serialized.length > 700) {
-        return `${serialized.slice(0, 700)}...<truncated>`;
+      if (serialized.length > MAX_LOG_PREVIEW_LENGTH) {
+        return `${serialized.slice(0, MAX_LOG_PREVIEW_LENGTH)}...<truncated>`;
       }
       return serialized;
     } catch {
@@ -1071,12 +1154,12 @@ export class AriadneOrchestrator {
     try {
       this.systemEventsLogStream.write(`${JSON.stringify(record)}\n`);
     } catch {
-      // Keep runtime resilient even when file logging fails.
+      // keep runtime resilient even when file logging fails.
     }
   }
 
-  private parsePositiveInteger(raw: string | undefined, fallback: number): number {
-    const parsed = Number(raw);
+  private parsePositiveInteger(value: string | undefined, fallback: number): number {
+    const parsed = Number(value);
     if (!Number.isFinite(parsed) || parsed < 1) {
       return fallback;
     }
@@ -1104,5 +1187,161 @@ export class AriadneOrchestrator {
       startedAt: session.startedAt,
       lastActivityAt: session.lastActivityAt,
     };
+  }
+
+  private async streamAudioChunk(
+    socket: WebSocket,
+    sessionId: string,
+    payload: ClientAudioChunkPayload,
+  ): Promise<void> {
+    let streamingState = this.socketStreamingStates.get(socket);
+
+    if (!streamingState) {
+      streamingState = {
+        sessionId,
+        connectionsBySpeaker: new Map(),
+        sampleRateHz: payload.sampleRateHz,
+        channels: payload.channels,
+        speakerId: payload.speakerId,
+        finalizedTranscripts: new Map(),
+      };
+      this.socketStreamingStates.set(socket, streamingState);
+    }
+
+    streamingState.sampleRateHz = payload.sampleRateHz;
+    streamingState.channels = payload.channels;
+    streamingState.speakerId = payload.speakerId ?? streamingState.speakerId;
+
+    const chunkBuffer = Buffer.from(payload.audioBase64, 'base64');
+    if (chunkBuffer.length === 0) {
+      return;
+    }
+
+    const speakerId = streamingState.speakerId ?? 'unknown';
+    let liveConn = streamingState.connectionsBySpeaker.get(speakerId);
+
+    if (!liveConn) {
+      liveConn = await this.createDeepgramLiveConnection(sessionId, socket, speakerId, payload.sampleRateHz);
+      streamingState.connectionsBySpeaker.set(speakerId, liveConn);
+    }
+
+    liveConn.connection.sendMedia(chunkBuffer);
+  }
+
+  private async createDeepgramLiveConnection(
+    sessionId: string,
+    socket: WebSocket,
+    speakerId: string,
+    sampleRateHz: number,
+  ): Promise<DeepgramLiveConnection> {
+    let resolveEndOfTurn: (transcript: string | null) => void;
+    const endOfTurnPromise = new Promise<string | null>((resolve) => {
+      resolveEndOfTurn = resolve;
+    });
+
+    const deepgramClient = this.deepgramClient!;
+    const connection = await deepgramClient.listen.v2.connect({
+      Authorization: `Token ${this.deepgramApiKey!}`,
+      model: 'flux-general-en',
+      encoding: 'linear16',
+      sample_rate: String(sampleRateHz),
+    });
+
+    connection.on('message', (message) => {
+      if (message.type === 'TurnInfo' && message.transcript) {
+        const streamingState = this.socketStreamingStates.get(socket);
+        if (!streamingState) return;
+
+        if (message.event === 'EndOfTurn') {
+          const transcript = message.transcript.trim();
+          if (transcript) {
+            const speakerTranscripts = streamingState.finalizedTranscripts.get(speakerId) ?? [];
+            speakerTranscripts.push(transcript);
+            streamingState.finalizedTranscripts.set(speakerId, speakerTranscripts);
+          }
+          resolveEndOfTurn(transcript);
+        } else if (message.event === 'Update') {
+          this.broadcast(sessionId, 'stt.interim', {
+            speakerId,
+            text: message.transcript,
+          });
+        }
+      }
+    });
+
+    connection.on('error', (error) => {
+      console.error(`[stt/streaming/${speakerId}] error:`, error);
+      resolveEndOfTurn(null);
+    });
+
+    connection.on('close', () => {
+      console.info(`[stt/streaming/${speakerId}] connection closed.`);
+    });
+
+    connection.connect();
+    await connection.waitForOpen();
+
+    return { connection, sampleRateHz, channels: 1, interimTranscript: '', endOfTurnPromise: endOfTurnPromise, resolveEndOfTurn: resolveEndOfTurn! };
+  }
+
+  private async finalizeStreamingAudio(
+    socket: WebSocket,
+    sessionId: string,
+    payload: ClientAudioCommitPayload,
+  ): Promise<void> {
+    const streamingState = this.socketStreamingStates.get(socket);
+    if (!streamingState) {
+      return;
+    }
+
+    this.socketStreamingStates.delete(socket);
+
+    for (const [speakerId, liveConn] of streamingState.connectionsBySpeaker.entries()) {
+      liveConn.connection.sendCloseStream({ type: 'Finalize' });
+
+      const finalTranscript = await Promise.race([
+        liveConn.endOfTurnPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+      ]);
+
+      const speakerTranscripts = streamingState.finalizedTranscripts.get(speakerId) ?? [];
+      const fullTranscript = speakerTranscripts.join(' ').trim();
+
+      if (!fullTranscript) {
+        liveConn.connection.close();
+        continue;
+      }
+
+      const resolvedSpeakerId = this.resolveSpeakerIdForSocket(socket, payload.speakerId ?? speakerId);
+
+      this.broadcast(sessionId, 'stt.transcript', {
+        speakerId: resolvedSpeakerId,
+        text: finalTranscript ?? fullTranscript,
+        reason: payload.reason ?? 'client.audio.commit',
+      });
+
+      await this.handleUtterance({
+        sessionId,
+        text: finalTranscript ?? fullTranscript,
+        speakerId: resolvedSpeakerId,
+      });
+
+      liveConn.connection.close();
+    }
+  }
+
+  private cleanupStreamingState(socket: WebSocket): void {
+    const streamingState = this.socketStreamingStates.get(socket);
+    if (!streamingState) return;
+
+    for (const [, liveConn] of streamingState.connectionsBySpeaker.entries()) {
+      try {
+        liveConn.connection.close();
+      } catch {
+        // best-effort cleanup
+      }
+    }
+
+    this.socketStreamingStates.delete(socket);
   }
 }

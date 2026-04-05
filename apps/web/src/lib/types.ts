@@ -16,7 +16,7 @@ export interface SystemEvent {
   details: string;
 }
 
-export interface SessionStatusView {
+export interface DashboardSessionStatus {
   sessionId: string;
   active: boolean;
   talkerStatus: 'idle' | 'active' | 'waiting';
@@ -44,5 +44,5 @@ export interface SessionEvent {
 export interface DashboardState {
   beliefStore: BeliefStore | null;
   directives: DirectiveResponse;
-  status: SessionStatusView | null;
+  status: DashboardSessionStatus | null;
 }

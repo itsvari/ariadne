@@ -1,5 +1,14 @@
 import { z } from 'zod';
 
+const MIN_THINKER_INTERVAL_SEC = 15;
+const MAX_THINKER_INTERVAL_SEC = 600;
+const DEFAULT_THINKER_INTERVAL_SEC = 60;
+const MIN_AUDIO_SAMPLE_RATE_HZ = 8000;
+const MAX_AUDIO_SAMPLE_RATE_HZ = 48000;
+const DEFAULT_AUDIO_SAMPLE_RATE_HZ = 16000;
+const MIN_AUDIO_CHANNELS = 1;
+const MAX_AUDIO_CHANNELS = 2;
+
 export const InterventionModeSchema = z.enum(['control', 'light']);
 export type InterventionMode = z.infer<typeof InterventionModeSchema>;
 
@@ -8,7 +17,7 @@ export const SessionConfigSchema = z.object({
   groupSize: z.number().int().min(1).optional(),
   taskId: z.string().optional(),
   phase: z.string().optional(),
-  thinkerIntervalSec: z.number().int().min(15).max(600).default(60),
+  thinkerIntervalSec: z.number().int().min(MIN_THINKER_INTERVAL_SEC).max(MAX_THINKER_INTERVAL_SEC).default(DEFAULT_THINKER_INTERVAL_SEC),
 });
 export type SessionConfig = z.infer<typeof SessionConfigSchema>;
 
@@ -329,8 +338,8 @@ export type ClientPingPayload = z.infer<typeof ClientPingPayloadSchema>;
 
 export const ClientAudioChunkPayloadSchema = z.object({
   audioBase64: z.string().min(1),
-  sampleRateHz: z.number().int().min(8000).max(48000).default(16000),
-  channels: z.number().int().min(1).max(2).default(1),
+  sampleRateHz: z.number().int().min(MIN_AUDIO_SAMPLE_RATE_HZ).max(MAX_AUDIO_SAMPLE_RATE_HZ).default(DEFAULT_AUDIO_SAMPLE_RATE_HZ),
+  channels: z.number().int().min(MIN_AUDIO_CHANNELS).max(MAX_AUDIO_CHANNELS).default(1),
   sequence: z.number().int().min(0).optional(),
   speakerId: z.string().optional(),
 });
@@ -416,9 +425,9 @@ export function createEmptyBeliefStore(): BeliefStore {
   return BeliefStoreSchema.parse({});
 }
 
-export function parseToolArguments<T extends Record<string, unknown>>(raw?: string): T {
+export function parseToolArguments<T extends Record<string, unknown>>(encoded?: string): T {
   try {
-    return JSON.parse(raw ?? '{}') as T;
+    return JSON.parse(encoded ?? '{}') as T;
   } catch {
     return {} as T;
   }

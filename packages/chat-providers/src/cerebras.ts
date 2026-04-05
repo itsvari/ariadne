@@ -39,11 +39,11 @@ export class CerebrasChatProvider implements ChatProvider {
     if (params.topP !== undefined) request.top_p = params.topP;
     if (params.reasoningEffort) request.reasoning_effort = params.reasoningEffort;
 
-    const raw = (await this.client.chat.completions.create(
+    const responseValue = (await this.client.chat.completions.create(
       request as unknown as Parameters<typeof this.client.chat.completions.create>[0],
     )) as unknown as CerebrasResponse;
 
-    const message = raw.choices?.[0]?.message;
+    const message = responseValue.choices?.[0]?.message;
     if (!message) {
       throw new Error('Cerebras returned no assistant message');
     }
@@ -51,7 +51,7 @@ export class CerebrasChatProvider implements ChatProvider {
     return {
       content: message.content,
       tool_calls: message.tool_calls,
-      raw,
+      raw: responseValue,
     };
   }
 }

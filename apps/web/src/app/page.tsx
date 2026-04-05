@@ -7,33 +7,34 @@ import { twMerge } from 'tailwind-merge';
 import type { BeliefStore } from '@ariadne/shared-contracts';
 import { useFluxSTT } from '../hooks/useFluxSTT';
 import { DEFAULT_SERVER_URL, eventSocketUrl, serverUrl } from '../lib/server';
-import type { DashboardState, Message, SessionEvent, SessionStatusView, SystemEvent } from '../lib/types';
+import type { DashboardState, Message, SessionEvent, DashboardSessionStatus, SystemEvent } from '../lib/types';
+
+const SESSION_ID_STORAGE_KEY = 'ariadne-session-id';
+const INTERVAL_OPTIONS = [30, 60, 120];
+const DASHBOARD_REFRESH_INTERVAL_MS = 5000;
+const CONVERSATION_FEED_HEIGHT_PX = 600;
+const EVENT_LOG_HEIGHT_PX = 240;
+const INT16_MIN = 0x8000;
+const INT16_RANGE = 0x10000;
 
 function cn(...parts: Array<string | false | null | undefined>) {
   return twMerge(clsx(parts));
 }
-
-const SESSION_ID_STORAGE_KEY = 'ariadne-session-id';
-
-const INTERVAL_OPTIONS = [30, 60, 120];
 
 export default function AriadneControlPanel() {
   const [sessionId, setSessionId] = useState('');
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [events, setEvents] = useState<SystemEvent[]>([]);
-  const [status, setStatus] = useState<SessionStatusView | null>(null);
+  const [status, setStatus] = useState<DashboardSessionStatus | null>(null);
   const [beliefStore, setBeliefStore] = useState<BeliefStore | null>(null);
   const [pendingDirectives, setPendingDirectives] = useState<DashboardState['directives']['pending']>([]);
   const [fulfilledDirectives, setFulfilledDirectives] = useState<DashboardState['directives']['fulfilled']>([]);
-  
-  // Local state for dropdowns
   const [interventionMode, setInterventionMode] = useState<'control' | 'light'>('light');
   const [thinkerIntervalSec, setThinkerIntervalSec] = useState(60);
-  
   const [isBusy, setIsBusy] = useState(false);
   const [audioReady, setAudioReady] = useState(false);
-  
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const eventsEndRef = useRef<HTMLDivElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -51,8 +52,8 @@ export default function AriadneControlPanel() {
       return;
     }
 
-    void audioContext.resume().catch((err) => {
-      console.warn('Audio context resume blocked:', err);
+    void audioContext.resume().catch((error) => {
+      console.warn('Audio context resume blocked:', error);
     });
   }, []);
 
@@ -62,7 +63,6 @@ export default function AriadneControlPanel() {
     setSessionId(querySessionId || savedSessionId || 'default');
   }, []);
 
-  // Fix: Track session status from backend
   useEffect(() => {
     if (status) {
       if (status.interventionMode) setInterventionMode(status.interventionMode);
@@ -77,7 +77,6 @@ export default function AriadneControlPanel() {
   }, [sessionId]);
 
   useEffect(() => {
-    // Fix: layout shifts. Use smooth scroll ONLY if within a bounded area, or auto to prevent page jump
     messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'nearest' });
   }, [messages]);
 
@@ -97,6 +96,43 @@ export default function AriadneControlPanel() {
     ]);
   }, []);
 
+  const decodePcmSamples = useCallback((chunk: Uint8Array, channels: number, sampleRateHz: number): AudioBuffer | null => {
+    const audioContext = audioContextRef.current;
+    if (!audioContext) {
+      return null;
+    }
+
+    if (channels < 1 || channels > 2) {
+      addEvent('TTS', `Unsupported channel count: ${channels}`);
+      return null;
+    }
+
+    const totalSampleCount = Math.floor(chunk.byteLength / 2);
+    const frameCount = Math.floor(totalSampleCount / channels);
+    if (frameCount <= 0) {
+      return null;
+    }
+
+    const audioBuffer = audioContext.createBuffer(channels, frameCount, sampleRateHz);
+    const channelData = Array.from({ length: channels }, (_, index) => audioBuffer.getChannelData(index));
+
+    for (let frame = 0; frame < frameCount; frame += 1) {
+      for (let channel = 0; channel < channels; channel += 1) {
+        const sampleIndex = frame * channels + channel;
+        const byteIndex = sampleIndex * 2;
+        const low = chunk[byteIndex];
+        const high = chunk[byteIndex + 1];
+        let sample = (high << 8) | low;
+        if (sample >= INT16_MIN) {
+          sample -= INT16_RANGE;
+        }
+        channelData[channel][frame] = sample / INT16_MIN;
+      }
+    }
+
+    return audioBuffer;
+  }, [addEvent]);
+
   const flushAudioQueue = useCallback(() => {
     const audioContext = audioContextRef.current;
     if (!audioContext || isAppendingRef.current) {
@@ -112,37 +148,14 @@ export default function AriadneControlPanel() {
           continue;
         }
 
-        const { data: chunk, sampleRateHz, channels } = queuedChunk;
-        if (channels < 1 || channels > 2) {
-          addEvent('TTS', `Unsupported channel count: ${channels}`);
-          continue;
-        }
-
-        const totalSampleCount = Math.floor(chunk.byteLength / 2);
-        const frameCount = Math.floor(totalSampleCount / channels);
-        if (frameCount <= 0) {
-          continue;
-        }
-
-        const audioBuffer = audioContext.createBuffer(channels, frameCount, sampleRateHz);
-        const channelData = Array.from({ length: channels }, (_, index) => audioBuffer.getChannelData(index));
-
-        for (let frame = 0; frame < frameCount; frame += 1) {
-          for (let channel = 0; channel < channels; channel += 1) {
-            const sampleIndex = frame * channels + channel;
-            const byteIndex = sampleIndex * 2;
-            const low = chunk[byteIndex];
-            const high = chunk[byteIndex + 1];
-            let sample = (high << 8) | low;
-            if (sample >= 0x8000) {
-              sample -= 0x10000;
-            }
-            channelData[channel][frame] = sample / 0x8000;
-          }
-        }
-
         if (ttsEncodingRef.current !== 'linear16') {
           addEvent('TTS', `Unsupported encoding in web player: ${ttsEncodingRef.current}`);
+          continue;
+        }
+
+        const { data: chunk, sampleRateHz, channels } = queuedChunk;
+        const audioBuffer = decodePcmSamples(chunk, channels, sampleRateHz);
+        if (!audioBuffer) {
           continue;
         }
 
@@ -155,15 +168,14 @@ export default function AriadneControlPanel() {
         source.start(startAt);
         nextPlaybackTimeRef.current = startAt + audioBuffer.duration;
       }
-    } catch (e) {
-      console.error('Failed to process PCM TTS chunk', e);
-      addEvent('TTS', `PCM playback error: ${e instanceof Error ? e.message : 'unknown'}`);
+    } catch (error) {
+      console.error('Failed to process PCM TTS chunk', error);
+      addEvent('TTS', `PCM playback error: ${error instanceof Error ? error.message : 'unknown'}`);
     } finally {
       isAppendingRef.current = false;
     }
-  }, [addEvent]);
+  }, [addEvent, decodePcmSamples]);
 
-  // Fix: Audio context synchronously bound to user interaction
   const ensureAudioPipeline = useCallback(() => {
     if (audioContextRef.current) {
       resumeAudioPlayback();
@@ -211,7 +223,7 @@ export default function AriadneControlPanel() {
 
       if (statusResponse.ok) {
         const statusPayload = (await statusResponse.json()) as {
-          status: SessionStatusView;
+          status: DashboardSessionStatus;
         };
         setStatus(statusPayload.status);
       }
@@ -230,87 +242,137 @@ export default function AriadneControlPanel() {
     }
   }, [sessionId]);
 
+  const updateConnectedClients = useCallback((connectedClients: number) => {
+    setStatus((currentStatus) => {
+      if (!currentStatus) {
+        return currentStatus;
+      }
+
+      return {
+        ...currentStatus,
+        connectedClients,
+      };
+    });
+  }, []);
+
+  const handleSessionJoined = useCallback((event: SessionEvent) => {
+    const payload = event.payload as { connectedClients?: number };
+    if (typeof payload.connectedClients === 'number') {
+      updateConnectedClients(payload.connectedClients);
+    }
+  }, [updateConnectedClients]);
+
+  const handleSessionLeft = useCallback((event: SessionEvent) => {
+    const payload = event.payload as { connectedClients?: number };
+    if (typeof payload.connectedClients === 'number') {
+      updateConnectedClients(payload.connectedClients);
+    }
+  }, [updateConnectedClients]);
+
+  const handleUtteranceFinal = useCallback((event: SessionEvent) => {
+    const payload = event.payload as { text: string; speakerId?: string };
+    setMessages((current) => [
+      ...current,
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: payload.text,
+        speakerId: payload.speakerId,
+      },
+    ]);
+    addEvent('UtteranceFinal', payload.text);
+  }, [addEvent]);
+
+  const handleTalkerOutput = useCallback((event: SessionEvent) => {
+    const payload = event.payload as { content?: string | null; tool_calls?: Array<{ function: { name: string; arguments: string } }> };
+    const speakCall = payload.tool_calls?.find((toolCall) => toolCall.function.name === 'speak');
+    const spokenText = speakCall
+      ? ((JSON.parse(speakCall.function.arguments) as { text?: string }).text ?? '')
+      : payload.content ?? '';
+    const normalizedToolCalls = payload.tool_calls?.map((toolCall) => ({
+      type: 'function' as const,
+      function: toolCall.function,
+    }));
+
+    setMessages((current) => [
+      ...current,
+      {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: spokenText,
+        reasoning: payload.content ?? undefined,
+        toolCalls: normalizedToolCalls,
+      },
+    ]);
+
+    if (spokenText) {
+      addEvent('TalkerResponse', spokenText);
+    }
+  }, [addEvent]);
+
+  const handleTtsAudioStart = useCallback((event: SessionEvent) => {
+    const payload = event.payload as { encoding?: string; sampleRateHz?: number; channels?: number };
+    ttsEncodingRef.current = payload.encoding ?? 'linear16';
+    ttsSampleRateRef.current = payload.sampleRateHz ?? 24000;
+    ttsChannelsRef.current = payload.channels ?? 1;
+    ttsChunkCountRef.current = 0;
+    audioQueueRef.current = [];
+
+    const audioContext = audioContextRef.current;
+    if (audioContext) {
+      nextPlaybackTimeRef.current = audioContext.currentTime;
+    }
+
+    addEvent(
+      'TTS',
+      `Audio start: ${ttsEncodingRef.current} ${ttsSampleRateRef.current}Hz ${ttsChannelsRef.current}ch`,
+    );
+  }, [addEvent]);
+
+  const handleTtsAudioChunk = useCallback((event: SessionEvent) => {
+    ensureAudioPipeline();
+    const payload = event.payload as {
+      audioBase64: string;
+      sampleRateHz?: number;
+      channels?: number;
+    };
+    audioQueueRef.current.push({
+      data: Uint8Array.from(atob(payload.audioBase64), (char) => char.charCodeAt(0)),
+      sampleRateHz: payload.sampleRateHz ?? ttsSampleRateRef.current,
+      channels: payload.channels ?? ttsChannelsRef.current,
+    });
+    ttsChunkCountRef.current += 1;
+    resumeAudioPlayback();
+    flushAudioQueue();
+  }, [ensureAudioPipeline, flushAudioQueue, resumeAudioPlayback]);
+
+  const handleTtsAudioDone = useCallback(() => {
+    const audioContext = audioContextRef.current;
+    if (audioContext) {
+      nextPlaybackTimeRef.current = audioContext.currentTime;
+    }
+    audioQueueRef.current = [];
+    addEvent('TTS', `Audio stream complete. ${ttsChunkCountRef.current} chunk(s).`);
+  }, [addEvent]);
+
   const handleSessionEvent = useCallback(
     (event: SessionEvent) => {
       switch (event.type) {
         case 'session.status':
-          setStatus(event.payload as SessionStatusView);
+          setStatus(event.payload as DashboardSessionStatus);
           break;
-        case 'client.joined': {
-          const payload = event.payload as { connectedClients?: number };
-          const connectedClients = payload.connectedClients;
-          if (typeof connectedClients === 'number') {
-            setStatus((currentStatus) => {
-              if (!currentStatus) {
-                return currentStatus;
-              }
-
-              return {
-                ...currentStatus,
-                connectedClients,
-              };
-            });
-          }
+        case 'client.joined':
+          handleSessionJoined(event);
           break;
-        }
-        case 'client.left': {
-          const payload = event.payload as { connectedClients?: number };
-          const connectedClients = payload.connectedClients;
-          if (typeof connectedClients === 'number') {
-            setStatus((currentStatus) => {
-              if (!currentStatus) {
-                return currentStatus;
-              }
-
-              return {
-                ...currentStatus,
-                connectedClients,
-              };
-            });
-          }
+        case 'client.left':
+          handleSessionLeft(event);
           break;
-        }
-        case 'utterance.final': {
-          const payload = event.payload as { text: string; speakerId?: string };
-          setMessages((current) => [
-            ...current,
-            {
-              id: crypto.randomUUID(),
-              role: 'user',
-              content: payload.text,
-              speakerId: payload.speakerId,
-            },
-          ]);
-          addEvent('UtteranceFinal', payload.text);
+        case 'utterance.final':
+          handleUtteranceFinal(event);
           break;
-        }
-        case 'talker.output': {
-          const payload = event.payload as { content?: string | null; tool_calls?: Array<{ function: { name: string; arguments: string } }> };
-          const speakCall = payload.tool_calls?.find((toolCall) => toolCall.function.name === 'speak');
-          const spokenText = speakCall
-            ? ((JSON.parse(speakCall.function.arguments) as { text?: string }).text ?? '')
-            : payload.content ?? '';
-          const normalizedToolCalls = payload.tool_calls?.map((toolCall) => ({
-            type: 'function' as const,
-            function: toolCall.function,
-          }));
-
-          setMessages((current) => [
-            ...current,
-            {
-              id: crypto.randomUUID(),
-              role: 'assistant',
-              content: spokenText,
-              reasoning: payload.content ?? undefined,
-              toolCalls: normalizedToolCalls,
-            },
-          ]);
-
-          if (spokenText) {
-            addEvent('TalkerResponse', spokenText);
-          }
+        case 'talker.output':
+          handleTalkerOutput(event);
           break;
-        }
         case 'avatar.command':
           addEvent('AvatarCommand', JSON.stringify(event.payload));
           break;
@@ -324,56 +386,20 @@ export default function AriadneControlPanel() {
         case 'speak':
           addEvent('Speak', String((event.payload as { text?: string }).text ?? ''));
           break;
-        case 'tts.audio.start': {
-          const payload = event.payload as { encoding?: string; sampleRateHz?: number; channels?: number };
-          ttsEncodingRef.current = payload.encoding ?? 'linear16';
-          ttsSampleRateRef.current = payload.sampleRateHz ?? 24000;
-          ttsChannelsRef.current = payload.channels ?? 1;
-          ttsChunkCountRef.current = 0;
-          audioQueueRef.current = [];
-
-          const audioContext = audioContextRef.current;
-          if (audioContext) {
-            nextPlaybackTimeRef.current = audioContext.currentTime;
-          }
-
-          addEvent(
-            'TTS',
-            `Audio start: ${ttsEncodingRef.current} ${ttsSampleRateRef.current}Hz ${ttsChannelsRef.current}ch`,
-          );
+        case 'tts.audio.start':
+          handleTtsAudioStart(event);
           break;
-        }
-        case 'tts.audio.chunk': {
-          ensureAudioPipeline();
-          const payload = event.payload as {
-            audioBase64: string;
-            sampleRateHz?: number;
-            channels?: number;
-          };
-          audioQueueRef.current.push({
-            data: Uint8Array.from(atob(payload.audioBase64), (char) => char.charCodeAt(0)),
-            sampleRateHz: payload.sampleRateHz ?? ttsSampleRateRef.current,
-            channels: payload.channels ?? ttsChannelsRef.current,
-          });
-          ttsChunkCountRef.current += 1;
-          resumeAudioPlayback();
-          flushAudioQueue();
+        case 'tts.audio.chunk':
+          handleTtsAudioChunk(event);
           break;
-        }
-        case 'tts.audio.done': {
-          const audioContext = audioContextRef.current;
-          if (audioContext) {
-            nextPlaybackTimeRef.current = audioContext.currentTime;
-          }
-          audioQueueRef.current = [];
-          addEvent('TTS', `Audio stream complete. ${ttsChunkCountRef.current} chunk(s).`);
+        case 'tts.audio.done':
+          handleTtsAudioDone();
           break;
-        }
         default:
           addEvent(event.type, JSON.stringify(event.payload));
       }
     },
-    [addEvent, ensureAudioPipeline, flushAudioQueue, refreshDashboard, resumeAudioPlayback],
+    [addEvent, handleSessionJoined, handleSessionLeft, handleUtteranceFinal, handleTalkerOutput, handleTtsAudioStart, handleTtsAudioChunk, handleTtsAudioDone, refreshDashboard],
   );
 
   useEffect(() => {
@@ -415,7 +441,7 @@ export default function AriadneControlPanel() {
 
     const timer = window.setInterval(() => {
       void refreshDashboard();
-    }, 5000);
+    }, DASHBOARD_REFRESH_INTERVAL_MS);
 
     return () => window.clearInterval(timer);
   }, [refreshDashboard, status?.active]);
@@ -436,7 +462,7 @@ export default function AriadneControlPanel() {
           sessionConfig: { interventionMode, thinkerIntervalSec },
         }),
       });
-      const payload = (await response.json()) as SessionStatusView;
+      const payload = (await response.json()) as DashboardSessionStatus;
       setStatus(payload);
       addEvent('System', `Session started against ${DEFAULT_SERVER_URL}`);
       await refreshDashboard();
@@ -457,7 +483,7 @@ export default function AriadneControlPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId }),
       });
-      const payload = (await response.json()) as SessionStatusView;
+      const payload = (await response.json()) as DashboardSessionStatus;
       setStatus(payload);
       addEvent('System', 'Session stopped.');
       await refreshDashboard();
@@ -504,7 +530,6 @@ export default function AriadneControlPanel() {
 
   const { isRecording, interimResults, startRecording, stopRecording } = useFluxSTT(sendUtterance);
 
-  // Stats mapped for UI
   const stats = useMemo(
     () => [
       {
@@ -528,7 +553,6 @@ export default function AriadneControlPanel() {
 
   return (
     <main className="min-h-screen p-4 md:p-8 flex flex-col gap-8 max-w-7xl mx-auto scanline">
-      {/* Header section */}
       <header className="panel p-6 border-b-4 border-b-[var(--accent)] flex flex-col lg:flex-row gap-6 justify-between items-start lg:items-end">
         <div className="space-y-4 max-w-2xl">
           <div className="mono inline-flex items-center gap-2 bg-[var(--text)] text-[var(--bg)] px-3 py-1 text-xs font-bold uppercase tracking-widest">
@@ -542,7 +566,7 @@ export default function AriadneControlPanel() {
             Live speech capture, thinker scheduling, belief tracking, and directive visibility in one console.
           </p>
         </div>
-        
+
         <div className="flex gap-4 w-full lg:w-auto">
           {stats.map((stat) => {
             const Icon = stat.icon;
@@ -559,11 +583,9 @@ export default function AriadneControlPanel() {
         </div>
       </header>
 
-      {/* Main Grid Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        {/* Left Column (Main Feed & Interactions) */}
         <div className="lg:col-span-7 flex flex-col gap-8">
-          
+
           <section className="panel p-6">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4 border-b border-[var(--border)] pb-4 mb-6">
               <div>
@@ -594,8 +616,8 @@ export default function AriadneControlPanel() {
                   onChange={(event) => setThinkerIntervalSec(Number(event.target.value))}
                   className="bg-[var(--bg)] border-2 border-[var(--border)] px-4 py-3 outline-none text-white focus:border-[var(--accent)] font-mono text-sm"
                 >
-                  {INTERVAL_OPTIONS.map((o) => (
-                    <option key={o} value={o}>{o}s INTERVAL</option>
+                  {INTERVAL_OPTIONS.map((intervalOption) => (
+                    <option key={intervalOption} value={intervalOption}>{intervalOption}s INTERVAL</option>
                   ))}
                 </select>
               </label>
@@ -611,7 +633,7 @@ export default function AriadneControlPanel() {
                 placeholder="Type something..."
                 className="flex-1 bg-[var(--bg)] border-2 border-[var(--border)] px-4 py-3 focus:border-[var(--accent)] font-mono outline-none placeholder-[var(--muted)]"
               />
-              <button 
+              <button
                 className="btn-brutal"
                 onClick={() => void sendUtterance(input)}
               >
@@ -650,7 +672,7 @@ export default function AriadneControlPanel() {
                 {audioReady ? 'Audio Ready' : 'Prime Audio'}
               </button>
             </div>
-            
+
             {interimResults.size > 0 && (
               <div className="mt-4 bg-[var(--panel-strong)] p-3 border-l-4 border-[var(--accent-warm)] font-mono text-sm text-[var(--accent-warm)]">
                 {Array.from(interimResults.entries()).map(([speaker, text]) => (
@@ -662,10 +684,10 @@ export default function AriadneControlPanel() {
 
           <section className="panel p-6 flex flex-col flex-1 relative">
             <h2 className="text-2xl font-bold uppercase mb-4 sticky top-0 bg-[var(--panel)] z-10 pb-2">Conversation Feed</h2>
-            <div className="flex-1 overflow-y-auto pr-2 scrollbar-brutal flex flex-col gap-4" style={{ height: '600px' }}>
+            <div className="flex-1 overflow-y-auto pr-2 scrollbar-brutal flex flex-col gap-4" style={{ height: `${CONVERSATION_FEED_HEIGHT_PX}px` }}>
               {messages.length === 0 ? (
                 <div className="h-full flex items-center justify-center font-mono text-[var(--muted)] border-2 border-dashed border-[var(--border)]">
-                  {/* // NO DATA IN BUFFER // */}
+                  {/* empty state placeholder */}
                 </div>
               ) : (
                 messages.map((message) => (
@@ -692,9 +714,9 @@ export default function AriadneControlPanel() {
 
                     {message.toolCalls?.length ? (
                       <div className="flex flex-col gap-2 mb-3">
-                        {message.toolCalls.map((tc, idx) => (
-                          <div key={idx} className="bg-[var(--panel-strong)] border border-[var(--accent-warm)] p-2 text-xs text-[var(--accent-warm)]">
-                            <span className="font-bold">{tc.function.name}</span>() &rarr; {tc.function.arguments}
+                        {message.toolCalls.map((toolCall, index) => (
+                          <div key={index} className="bg-[var(--panel-strong)] border border-[var(--accent-warm)] p-2 text-xs text-[var(--accent-warm)]">
+                            <span className="font-bold">{toolCall.function.name}</span>() &rarr; {toolCall.function.arguments}
                           </div>
                         ))}
                       </div>
@@ -712,9 +734,8 @@ export default function AriadneControlPanel() {
 
         </div>
 
-        {/* Right Column (Metrics & Logs) */}
         <div className="lg:col-span-5 flex flex-col gap-8">
-          
+
           <section className="panel p-6">
             <h2 className="text-xl font-bold uppercase border-b border-[var(--border)] pb-2 mb-4">Session Status</h2>
             <div className="grid grid-cols-2 gap-3 text-sm font-mono">
@@ -741,7 +762,7 @@ export default function AriadneControlPanel() {
 
           <section className="panel p-6">
             <h2 className="text-xl font-bold uppercase border-b border-[var(--border)] pb-2 mb-4">Belief Store</h2>
-            
+
             <div className="flex flex-col gap-4 font-mono text-sm">
               <div className="border border-[var(--border)] bg-[var(--bg)]">
                 <div className="bg-[var(--text)] text-[var(--bg)] px-3 py-1 text-xs font-bold uppercase">Discussion State</div>
@@ -756,7 +777,7 @@ export default function AriadneControlPanel() {
                 <div className="bg-[var(--text)] text-[var(--bg)] px-3 py-1 text-xs font-bold uppercase">Plan</div>
                 <ul className="p-3 space-y-1 text-xs text-[var(--text)] list-disc list-inside">
                   {(beliefStore?.facilitation_plan ?? []).length ? (
-                    beliefStore?.facilitation_plan.map((item, idx) => <li key={idx}>{item}</li>)
+                    beliefStore?.facilitation_plan.map((item, index) => <li key={index}>{item}</li>)
                   ) : (
                     <li className="list-none text-[var(--muted)]">NO PLAN DETECTED</li>
                   )}
@@ -767,11 +788,11 @@ export default function AriadneControlPanel() {
                 <div className="bg-[var(--text)] text-[var(--bg)] px-3 py-1 text-xs font-bold uppercase">Actors</div>
                 <div className="p-3 flex flex-col gap-2">
                   {(beliefStore?.participants ?? []).length ? (
-                    beliefStore?.participants.map((p) => (
-                      <div key={p.id} className="border border-[var(--border)] p-2">
-                        <div className="text-[var(--accent)] font-bold">{p.id}</div>
+                    beliefStore?.participants.map((participant) => (
+                      <div key={participant.id} className="border border-[var(--border)] p-2">
+                        <div className="text-[var(--accent)] font-bold">{participant.id}</div>
                         <div className="text-xs mt-1 text-[var(--muted)]">
-                          {p.stance} | {p.emotionalTone} | {p.engagementLevel}
+                          {participant.stance} | {participant.emotionalTone} | {participant.engagementLevel}
                         </div>
                       </div>
                     ))
@@ -790,13 +811,13 @@ export default function AriadneControlPanel() {
                 <div className="text-[var(--muted)] mb-2 font-bold uppercase">Pending Queue</div>
                 <div className="space-y-2">
                   {pendingDirectives.length === 0 && <div className="text-[var(--muted)]">EMPTY</div>}
-                  {pendingDirectives.map(d => (
-                    <div key={d.id} className="border-l-4 border-[var(--accent-warm)] bg-[var(--panel-strong)] p-2 text-[var(--text)]">
+                  {pendingDirectives.map((directive) => (
+                    <div key={directive.id} className="border-l-4 border-[var(--accent-warm)] bg-[var(--panel-strong)] p-2 text-[var(--text)]">
                       <div className="flex justify-between text-[10px] text-[var(--muted)] mb-1">
-                        <span>{d.priority}</span>
-                        <span>{new Date(d.createdAt).toLocaleTimeString()}</span>
+                        <span>{directive.priority}</span>
+                        <span>{new Date(directive.createdAt).toLocaleTimeString()}</span>
                       </div>
-                      {d.instruction}
+                      {directive.instruction}
                     </div>
                   ))}
                 </div>
@@ -805,9 +826,9 @@ export default function AriadneControlPanel() {
                 <div className="text-[var(--muted)] mb-2 font-bold uppercase">Fulfilled</div>
                 <div className="space-y-2 text-[var(--muted)] opacity-70">
                   {fulfilledDirectives.length === 0 && <div>EMPTY</div>}
-                  {fulfilledDirectives.map(d => (
-                    <div key={d.id} className="border-l-2 border-[var(--border)] bg-[var(--bg)] p-2">
-                      {d.instruction}
+                  {fulfilledDirectives.map((directive) => (
+                    <div key={directive.id} className="border-l-2 border-[var(--border)] bg-[var(--bg)] p-2">
+                      {directive.instruction}
                     </div>
                   ))}
                 </div>
@@ -817,14 +838,14 @@ export default function AriadneControlPanel() {
 
           <section className="panel p-6">
             <h2 className="text-xl font-bold uppercase border-b border-[var(--border)] pb-2 mb-4">Event Log</h2>
-            <div className="overflow-y-auto scrollbar-brutal font-mono text-xs space-y-2 pr-2 flex flex-col" style={{ height: '240px' }}>
-              {events.map(ev => (
-                <div key={ev.id} className="bg-[var(--bg)] border border-[var(--border)] p-2">
+            <div className="overflow-y-auto scrollbar-brutal font-mono text-xs space-y-2 pr-2 flex flex-col" style={{ height: `${EVENT_LOG_HEIGHT_PX}px` }}>
+              {events.map((systemEvent) => (
+                <div key={systemEvent.id} className="bg-[var(--bg)] border border-[var(--border)] p-2">
                   <div className="flex justify-between text-[9px] text-[var(--accent)] mb-1 uppercase tracking-widest">
-                    <span>{ev.type}</span>
-                    <span>{new Date(ev.timestamp).toLocaleTimeString()}</span>
+                    <span>{systemEvent.type}</span>
+                    <span>{new Date(systemEvent.timestamp).toLocaleTimeString()}</span>
                   </div>
-                  <div className="text-[var(--text)] break-all">{ev.details}</div>
+                  <div className="text-[var(--text)] break-all">{systemEvent.details}</div>
                 </div>
               ))}
               <div ref={eventsEndRef} />
