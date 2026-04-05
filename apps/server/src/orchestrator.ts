@@ -68,6 +68,8 @@ interface DeepgramLiveConnection {
   sampleRateHz: number;
   channels: number;
   interimTranscript: string;
+  endOfTurnPromise: Promise<string | null>;
+  resolveEndOfTurn: (transcript: string | null) => void;
 }
 
 interface SocketStreamingState {
@@ -76,7 +78,7 @@ interface SocketStreamingState {
   sampleRateHz: number;
   channels: number;
   speakerId?: string;
-  finalizedTranscripts: string[];
+  finalizedTranscripts: Map<string, string[]>;
 }
 
 type StreamReader = ReturnType<ReadableStream<Uint8Array>['getReader']>;
@@ -124,6 +126,7 @@ export class AriadneOrchestrator {
   private talkerProvider: ChatProvider;
   private thinkerProvider: ChatProvider;
   private ttsProvider: DeepgramTTSProvider;
+  private deepgramClient: DeepgramClient | undefined;
   private deepgramApiKey?: string;
   private transcribeAudio?: AriadneOrchestratorOptions['transcribeAudio'];
   private readonly logSystemEvents = (process.env.LOG_SYSTEM_EVENTS ?? 'true').toLowerCase() !== 'false';
@@ -145,6 +148,9 @@ export class AriadneOrchestrator {
     this.thinkerProvider = options.thinkerProvider ?? new OpenRouterChatProvider();
     this.ttsProvider = options.ttsProvider ?? new DeepgramTTSProvider();
     this.deepgramApiKey = options.deepgramApiKey ?? process.env.DEEPGRAM_API_KEY;
+    if (this.deepgramApiKey) {
+      this.deepgramClient = new DeepgramClient({ apiKey: this.deepgramApiKey });
+    }
     this.transcribeAudio = options.transcribeAudio;
     this.systemEventsLogStream = this.createSystemEventsLogStream();
 
@@ -386,13 +392,14 @@ export class AriadneOrchestrator {
       return;
     }
 
-    await this.maybeTriggerTalkerForDirectives(sessionId, reason, thinkerRunStartedAtIso);
+    await this.maybeTriggerTalkerForDirectives(sessionId, reason, thinkerRunStartedAtIso, result.directives.length);
   }
 
   private async maybeTriggerTalkerForDirectives(
     sessionId: string,
     reason: string,
     thinkerRunStartedAtIso: string,
+    directiveCount: number,
   ): Promise<void> {
     const latestHistory = await this.beliefStore.getHistory(sessionId, 4);
     const latestUserUtterance = [...latestHistory]
@@ -408,7 +415,7 @@ export class AriadneOrchestrator {
       this.broadcast(sessionId, 'telemetry', {
         type: 'reasoner.skip_talker_stale_directives',
         sessionId,
-        directiveCount: 0,
+        directiveCount,
         reason,
         thinkerRunStartedAt: thinkerRunStartedAtIso,
         latestUserUtteranceAt: latestUserUtterance?.timestamp,
@@ -419,7 +426,7 @@ export class AriadneOrchestrator {
     this.broadcast(sessionId, 'telemetry', {
       type: 'reasoner.trigger_talker',
       sessionId,
-      directiveCount: 0,
+      directiveCount,
       reason,
     });
     await this.scheduleTalker(sessionId);
@@ -1196,7 +1203,7 @@ export class AriadneOrchestrator {
         sampleRateHz: payload.sampleRateHz,
         channels: payload.channels,
         speakerId: payload.speakerId,
-        finalizedTranscripts: [],
+        finalizedTranscripts: new Map(),
       };
       this.socketStreamingStates.set(socket, streamingState);
     }
@@ -1227,8 +1234,13 @@ export class AriadneOrchestrator {
     speakerId: string,
     sampleRateHz: number,
   ): Promise<DeepgramLiveConnection> {
-    const deepgram = new DeepgramClient({ apiKey: this.deepgramApiKey! });
-    const connection = await deepgram.listen.v2.connect({
+    let resolveEndOfTurn: (transcript: string | null) => void;
+    const endOfTurnPromise = new Promise<string | null>((resolve) => {
+      resolveEndOfTurn = resolve;
+    });
+
+    const deepgramClient = this.deepgramClient!;
+    const connection = await deepgramClient.listen.v2.connect({
       Authorization: `Token ${this.deepgramApiKey!}`,
       model: 'flux-general-en',
       encoding: 'linear16',
@@ -1241,9 +1253,13 @@ export class AriadneOrchestrator {
         if (!streamingState) return;
 
         if (message.event === 'EndOfTurn') {
-          if (message.transcript.trim()) {
-            streamingState.finalizedTranscripts.push(message.transcript.trim());
+          const transcript = message.transcript.trim();
+          if (transcript) {
+            const speakerTranscripts = streamingState.finalizedTranscripts.get(speakerId) ?? [];
+            speakerTranscripts.push(transcript);
+            streamingState.finalizedTranscripts.set(speakerId, speakerTranscripts);
           }
+          resolveEndOfTurn(transcript);
         } else if (message.event === 'Update') {
           this.broadcast(sessionId, 'stt.interim', {
             speakerId,
@@ -1255,6 +1271,7 @@ export class AriadneOrchestrator {
 
     connection.on('error', (error) => {
       console.error(`[stt/streaming/${speakerId}] error:`, error);
+      resolveEndOfTurn(null);
     });
 
     connection.on('close', () => {
@@ -1264,7 +1281,7 @@ export class AriadneOrchestrator {
     connection.connect();
     await connection.waitForOpen();
 
-    return { connection, sampleRateHz, channels: 1, interimTranscript: '' };
+    return { connection, sampleRateHz, channels: 1, interimTranscript: '', endOfTurnPromise: endOfTurnPromise, resolveEndOfTurn: resolveEndOfTurn! };
   }
 
   private async finalizeStreamingAudio(
@@ -1282,11 +1299,13 @@ export class AriadneOrchestrator {
     for (const [speakerId, liveConn] of streamingState.connectionsBySpeaker.entries()) {
       liveConn.connection.sendCloseStream({ type: 'Finalize' });
 
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 2000);
-      });
+      const finalTranscript = await Promise.race([
+        liveConn.endOfTurnPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+      ]);
 
-      const fullTranscript = streamingState.finalizedTranscripts.join(' ').trim();
+      const speakerTranscripts = streamingState.finalizedTranscripts.get(speakerId) ?? [];
+      const fullTranscript = speakerTranscripts.join(' ').trim();
 
       if (!fullTranscript) {
         liveConn.connection.close();
@@ -1297,13 +1316,13 @@ export class AriadneOrchestrator {
 
       this.broadcast(sessionId, 'stt.transcript', {
         speakerId: resolvedSpeakerId,
-        text: fullTranscript,
+        text: finalTranscript ?? fullTranscript,
         reason: payload.reason ?? 'client.audio.commit',
       });
 
       await this.handleUtterance({
         sessionId,
-        text: fullTranscript,
+        text: finalTranscript ?? fullTranscript,
         speakerId: resolvedSpeakerId,
       });
 
