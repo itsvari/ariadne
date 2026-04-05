@@ -2,13 +2,6 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { DeepgramTTSProvider, synthesizeSpeech } from './index';
 import type { TTSProvider } from '@ariadne/shared-contracts';
 
-const MockWebSocketClass = vi.fn().mockImplementation(function (this: Record<string, ReturnType<typeof vi.fn>>) {
-  this.on = vi.fn();
-  this.send = vi.fn();
-  this.close = vi.fn();
-  return this;
-});
-
 vi.mock('ws', () => ({
   default: vi.fn().mockImplementation(function (this: Record<string, ReturnType<typeof vi.fn>>) {
     this.on = vi.fn();
@@ -37,7 +30,6 @@ describe('DeepgramTTSProvider', () => {
     vi.resetModules();
     process.env = { ...originalEnv };
     vi.clearAllMocks();
-    MockWebSocketClass.mockClear();
   });
 
   afterEach(() => {
