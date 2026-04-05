@@ -105,7 +105,7 @@ Shared TypeScript types and schemas live in `packages/shared-contracts` so that 
 | `UtteranceChunk` | Input Pipeline | Talker |
 | `UtteranceFinal` | Input Pipeline | Talker, Thinker context buffer |
 | `WorldStateUpdate` | Input Pipeline | Talker (as context), Thinker |
-| `ThinkerComplete` | Thinker | Talker (wake / update signal) |
+| `ReasonerComplete` | Thinker | Talker (wake / update signal) |
 | `TalkerWaitFlag` | Talker | Thinker (early trigger) |
 | `AvatarCommand` | Talker, Thinker | Avatar Controller |
 
