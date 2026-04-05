@@ -43,7 +43,7 @@ vi.mock('iovalkey', () => {
 
 async function getMock() {
   const { default: MockValkey } = await import('iovalkey');
-  const valkey = MockValkey as ReturnType<typeof vi.fn>;
+  const valkey = MockValkey as unknown as ReturnType<typeof vi.fn>;
   const lastCall = valkey.mock.results[valkey.mock.results.length - 1];
   return lastCall?.value as MockValkeyInstance;
 }

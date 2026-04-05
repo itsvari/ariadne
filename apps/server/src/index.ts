@@ -58,6 +58,7 @@ async function bootstrap(): Promise<void> {
     talkerProvider,
     thinkerProvider,
     ttsProvider,
+    deepgramApiKey: process.env.DEEPGRAM_API_KEY,
     transcribeAudio: async ({ audioBuffer, sampleRateHz, channels }) => {
       if (!deepgram) {
         return null;
@@ -338,7 +339,7 @@ async function transcribeAudioBuffer(
   const channels = options?.channels ?? 1;
 
   const request = {
-    model: 'nova-3',
+    model: 'flux',
     encoding: 'linear16',
     sample_rate: sampleRateHz,
     channels,

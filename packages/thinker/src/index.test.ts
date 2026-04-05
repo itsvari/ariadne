@@ -698,7 +698,7 @@ describe('normalizeParticipant', () => {
   it('filters out participants with empty string id', async () => {
     const provider = new MockChatProvider();
     const store = makeBeliefStore();
-    store.participants = ['  '] as unknown as typeof store.participants[number];
+    store.participants = [{ id: '  ', speakingFrequency: 0, stance: '', emotionalTone: '', engagementLevel: 0 }] as unknown as typeof store.participants;
 
     provider.result = {
       content: null,

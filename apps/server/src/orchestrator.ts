@@ -1,7 +1,8 @@
 import type { Server as HttpServer } from 'http';
 import { createWriteStream, mkdirSync, type WriteStream } from 'fs';
 import { dirname, resolve } from 'path';
-import WebSocket, { WebSocketServer } from 'ws';
+import WS, { WebSocketServer, WebSocket } from 'ws';
+import { DeepgramClient } from '@deepgram/sdk';
 import { EventBus } from '@ariadne/event-bus';
 import {
   OpenRouterChatProvider,
@@ -60,6 +61,24 @@ interface SocketAudioBufferState {
   speakerId?: string;
 }
 
+type V2Socket = Awaited<ReturnType<DeepgramClient['listen']['v2']['connect']>>;
+
+interface DeepgramLiveConnection {
+  connection: V2Socket;
+  sampleRateHz: number;
+  channels: number;
+  interimTranscript: string;
+}
+
+interface SocketStreamingState {
+  sessionId: string;
+  connectionsBySpeaker: Map<string, DeepgramLiveConnection>;
+  sampleRateHz: number;
+  channels: number;
+  speakerId?: string;
+  finalizedTranscripts: string[];
+}
+
 type StreamReader = ReturnType<ReadableStream<Uint8Array>['getReader']>;
 
 interface ActiveSpeechState {
@@ -86,6 +105,7 @@ export interface AriadneOrchestratorOptions {
   talkerProvider?: ChatProvider;
   thinkerProvider?: ChatProvider;
   ttsProvider?: DeepgramTTSProvider;
+  deepgramApiKey?: string;
   transcribeAudio?: (input: {
     audioBuffer: Buffer;
     sampleRateHz: number;
@@ -97,12 +117,14 @@ export class AriadneOrchestrator {
   private sessions = new Map<string, SessionState>();
   private socketClientMetadata = new WeakMap<WebSocket, SocketClientMetadata>();
   private socketAudioBuffers = new WeakMap<WebSocket, SocketAudioBufferState>();
+  private socketStreamingStates = new WeakMap<WebSocket, SocketStreamingState>();
   private bus = new EventBus();
   private wsServer: WebSocketServer;
   private beliefStore: SharedBeliefStore;
   private talkerProvider: ChatProvider;
   private thinkerProvider: ChatProvider;
   private ttsProvider: DeepgramTTSProvider;
+  private deepgramApiKey?: string;
   private transcribeAudio?: AriadneOrchestratorOptions['transcribeAudio'];
   private readonly logSystemEvents = (process.env.LOG_SYSTEM_EVENTS ?? 'true').toLowerCase() !== 'false';
   private readonly logSystemEventsToFile = (process.env.LOG_SYSTEM_EVENTS_TO_FILE ?? 'true').toLowerCase() !== 'false';
@@ -122,6 +144,7 @@ export class AriadneOrchestrator {
     this.talkerProvider = options.talkerProvider ?? new CerebrasChatProvider();
     this.thinkerProvider = options.thinkerProvider ?? new OpenRouterChatProvider();
     this.ttsProvider = options.ttsProvider ?? new DeepgramTTSProvider();
+    this.deepgramApiKey = options.deepgramApiKey ?? process.env.DEEPGRAM_API_KEY;
     this.transcribeAudio = options.transcribeAudio;
     this.systemEventsLogStream = this.createSystemEventsLogStream();
 
@@ -713,6 +736,7 @@ export class AriadneOrchestrator {
     socket.on('close', () => {
       session.sockets.delete(socket);
       this.socketAudioBuffers.delete(socket);
+      this.cleanupStreamingState(socket);
 
       const metadata = this.socketClientMetadata.get(socket);
       this.socketClientMetadata.delete(socket);
@@ -792,12 +816,20 @@ export class AriadneOrchestrator {
     }
 
     if (message.type === 'client.audio.chunk') {
-      this.bufferAudioChunk(socket, message.payload);
+      if (this.deepgramApiKey) {
+        await this.streamAudioChunk(socket, sessionId, message.payload);
+      } else {
+        this.bufferAudioChunk(socket, message.payload);
+      }
       return;
     }
 
     if (message.type === 'client.audio.commit') {
-      await this.flushBufferedAudioToUtterance(socket, sessionId, message.payload ?? {});
+      if (this.deepgramApiKey) {
+        await this.finalizeStreamingAudio(socket, sessionId, message.payload ?? {});
+      } else {
+        await this.flushBufferedAudioToUtterance(socket, sessionId, message.payload ?? {});
+      }
     }
   }
 
@@ -1148,5 +1180,149 @@ export class AriadneOrchestrator {
       startedAt: session.startedAt,
       lastActivityAt: session.lastActivityAt,
     };
+  }
+
+  private async streamAudioChunk(
+    socket: WebSocket,
+    sessionId: string,
+    payload: ClientAudioChunkPayload,
+  ): Promise<void> {
+    let streamingState = this.socketStreamingStates.get(socket);
+
+    if (!streamingState) {
+      streamingState = {
+        sessionId,
+        connectionsBySpeaker: new Map(),
+        sampleRateHz: payload.sampleRateHz,
+        channels: payload.channels,
+        speakerId: payload.speakerId,
+        finalizedTranscripts: [],
+      };
+      this.socketStreamingStates.set(socket, streamingState);
+    }
+
+    streamingState.sampleRateHz = payload.sampleRateHz;
+    streamingState.channels = payload.channels;
+    streamingState.speakerId = payload.speakerId ?? streamingState.speakerId;
+
+    const chunkBuffer = Buffer.from(payload.audioBase64, 'base64');
+    if (chunkBuffer.length === 0) {
+      return;
+    }
+
+    const speakerId = streamingState.speakerId ?? 'unknown';
+    let liveConn = streamingState.connectionsBySpeaker.get(speakerId);
+
+    if (!liveConn) {
+      liveConn = await this.createDeepgramLiveConnection(sessionId, socket, speakerId, payload.sampleRateHz);
+      streamingState.connectionsBySpeaker.set(speakerId, liveConn);
+    }
+
+    liveConn.connection.sendMedia(chunkBuffer);
+  }
+
+  private async createDeepgramLiveConnection(
+    sessionId: string,
+    socket: WebSocket,
+    speakerId: string,
+    sampleRateHz: number,
+  ): Promise<DeepgramLiveConnection> {
+    const deepgram = new DeepgramClient({ apiKey: this.deepgramApiKey! });
+    const connection = await deepgram.listen.v2.connect({
+      Authorization: `Token ${this.deepgramApiKey!}`,
+      model: 'flux-general-en',
+      encoding: 'linear16',
+      sample_rate: String(sampleRateHz),
+    });
+
+    connection.on('message', (message) => {
+      if (message.type === 'TurnInfo' && message.transcript) {
+        const streamingState = this.socketStreamingStates.get(socket);
+        if (!streamingState) return;
+
+        if (message.event === 'EndOfTurn') {
+          if (message.transcript.trim()) {
+            streamingState.finalizedTranscripts.push(message.transcript.trim());
+          }
+        } else if (message.event === 'Update') {
+          this.broadcast(sessionId, 'stt.interim', {
+            speakerId,
+            text: message.transcript,
+          });
+        }
+      }
+    });
+
+    connection.on('error', (error) => {
+      console.error(`[stt/streaming/${speakerId}] error:`, error);
+    });
+
+    connection.on('close', () => {
+      console.info(`[stt/streaming/${speakerId}] connection closed.`);
+    });
+
+    connection.connect();
+    await connection.waitForOpen();
+
+    return { connection, sampleRateHz, channels: 1, interimTranscript: '' };
+  }
+
+  private async finalizeStreamingAudio(
+    socket: WebSocket,
+    sessionId: string,
+    payload: ClientAudioCommitPayload,
+  ): Promise<void> {
+    const streamingState = this.socketStreamingStates.get(socket);
+    if (!streamingState) {
+      return;
+    }
+
+    this.socketStreamingStates.delete(socket);
+
+    for (const [speakerId, liveConn] of streamingState.connectionsBySpeaker.entries()) {
+      liveConn.connection.sendCloseStream({ type: 'Finalize' });
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 2000);
+      });
+
+      const fullTranscript = streamingState.finalizedTranscripts.join(' ').trim();
+
+      if (!fullTranscript) {
+        liveConn.connection.close();
+        continue;
+      }
+
+      const resolvedSpeakerId = this.resolveSpeakerIdForSocket(socket, payload.speakerId ?? speakerId);
+
+      this.broadcast(sessionId, 'stt.transcript', {
+        speakerId: resolvedSpeakerId,
+        text: fullTranscript,
+        reason: payload.reason ?? 'client.audio.commit',
+      });
+
+      await this.handleUtterance({
+        sessionId,
+        text: fullTranscript,
+        speakerId: resolvedSpeakerId,
+      });
+
+      liveConn.connection.close();
+    }
+  }
+
+  private cleanupStreamingState(socket: WebSocket): void {
+    const streamingState = this.socketStreamingStates.get(socket);
+    if (!streamingState) return;
+
+    for (const [, liveConn] of streamingState.connectionsBySpeaker.entries()) {
+      try {
+        liveConn.connection.close();
+      } catch {
+        // best-effort cleanup
+      }
+    }
+
+    this.socketStreamingStates.delete(socket);
   }
 }

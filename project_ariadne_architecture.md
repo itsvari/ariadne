@@ -326,7 +326,7 @@ Items deferred for future design sessions:
 - [x] ~~TTS provider and streaming interface~~ — Deepgram Aura WebSocket streaming in `packages/tts-client`
 - [x] ~~Session persistence storage technology~~ — Valkey (Redis-compatible) via `packages/shared-belief-store`
 - [x] ~~Talker and Thinker model selection~~ — configurable via env vars (`OPENROUTER_MODEL`, `CEREBRAS_API_KEY`)
-- [ ] Streaming STT provider and latency profile — currently using Deepgram Nova-3 batch transcription; real-time streaming STT not yet wired
+- [ ] Streaming STT provider and latency profile — currently using Deepgram Flux batch transcription; real-time streaming STT not yet wired
 - [ ] Exact token thresholds triggering history compaction
 - [ ] Avatar command vocabulary finalisation (with Avatar Controller team)
 - [ ] Multi-session memory (should the AI remember participants across separate sessions?)

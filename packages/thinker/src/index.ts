@@ -371,10 +371,13 @@ function normalizeParticipant(entry: unknown, index: number): Record<string, unk
   const candidate = parsedValue as Record<string, unknown>;
   const rawId = candidate.id;
   const participantId = typeof rawId === 'string'
-    ? rawId
+    ? rawId.trim() || null
     : typeof rawId === 'number'
       ? String(rawId)
       : `participant_${index + 1}`;
+  if (!participantId) {
+    return null;
+  }
 
   return {
     ...candidate,
