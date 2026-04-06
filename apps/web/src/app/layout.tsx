@@ -1,16 +1,11 @@
 import type { Metadata } from 'next';
-import { Space_Grotesk, IBM_Plex_Mono } from 'next/font/google';
+import { JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 
-const displayFont = Space_Grotesk({
-  variable: '--font-display',
-  subsets: ['latin'],
-});
-
-const monoFont = IBM_Plex_Mono({
+const mono = JetBrains_Mono({
   variable: '--font-mono',
-  weight: ['400', '500', '600'],
   subsets: ['latin'],
+  weight: ['400', '500', '700'],
 });
 
 export const metadata: Metadata = {
@@ -21,7 +16,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className={`${displayFont.variable} ${monoFont.variable}`}>{children}</body>
+      <body className={mono.variable}>{children}</body>
     </html>
   );
 }

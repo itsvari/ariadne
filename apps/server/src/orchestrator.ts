@@ -367,7 +367,7 @@ export class AriadneOrchestrator {
     sessionId: string,
     reason: string,
     thinkerRunStartedAtIso: string,
-    result: { directives: Array<{ id: string }>; updatedBeliefStore: unknown },
+    result: { directives: Array<{ id: string }>; updatedBeliefStore: unknown; completion: { content?: string | null; tool_calls?: Array<{ function: { name: string; arguments: string } }> } },
   ): Promise<void> {
     const session = this.getRequiredSession(sessionId);
 
@@ -385,6 +385,8 @@ export class AriadneOrchestrator {
       reason,
       directiveCount: result.directives.length,
       updatedBeliefStore: result.updatedBeliefStore,
+      content: result.completion.content,
+      toolCalls: result.completion.tool_calls,
     });
     this.broadcast(sessionId, 'session.status', this.serializeSession(session));
 
