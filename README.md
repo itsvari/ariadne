@@ -2,7 +2,7 @@
 
 Project Ariadne is an LLM-powered, embodied discussion facilitator for 3D virtual environments. It operates as an AI participant inside a multiplayer VR world, perceiving conversation through live audio, interpreting world state, and participating through a TTS-synthesised voice and avatar control.
 
-Originally built for [CS4240 Interaction Design for Virtual and Augmented Reality](https://nusmods.com/courses/CS4240/interaction-design-for-virtual-and-augmented-reality) at the National University of Singapore (NUS).
+Originally built for [CS4240 Interaction Design for Virtual and Augmented Reality](https://nusmods.com/courses/CS4240/interaction-design-for-virtual-and-augmented-reality) at the National University of Singapore (NUS), and featured in the [28th SoC Term Project Showcase](https://uvents.nus.edu.sg/event/28th-steps).
 
 ## Architecture
 
