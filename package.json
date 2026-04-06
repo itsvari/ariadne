@@ -20,6 +20,7 @@
     "dev:web": "turbo run dev --filter=apps-web",
     "dev:server": "turbo run dev --filter=apps-server",
     "lint": "turbo run lint",
+    "start": "turbo run start --parallel",
     "test": "vitest run"
   },
   "devDependencies": {
