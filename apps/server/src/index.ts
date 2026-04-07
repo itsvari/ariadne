@@ -339,7 +339,7 @@ async function transcribeAudioBuffer(
   const channels = options?.channels ?? 1;
 
   const request = {
-    model: 'flux',
+    model: 'nova-2',
     encoding: 'linear16',
     sample_rate: sampleRateHz,
     channels,
