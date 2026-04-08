@@ -26,6 +26,10 @@ Create a `.env` file inside `apps/server/`. The dev and start scripts load it au
 | `CEREBRAS_API_KEY` | **Yes** | API key for Cerebras. Powers the Talker model in this server build. |
 | `CEREBRAS_TALKER_MODEL` | No | Override the Talker model (default: `gpt-oss-120b`). |
 | `DEEPGRAM_API_KEY` | **Yes** | API key for Deepgram. Powers speech-to-text (`/utterance/audio`) and text-to-speech streaming over WebSocket. |
+| `FLUX_TRANSCRIBE_TIMEOUT_MS` | No | Max time to wait for a finalized Flux transcript before returning best available text (default: `10000`). |
+| `FLUX_EOT_THRESHOLD` | No | Flux end-of-turn confidence threshold used by server-side STT (default: `0.35`). |
+| `FLUX_EAGER_EOT_THRESHOLD` | No | Flux eager end-of-turn threshold for early turn completion signaling (default: `0.25`). |
+| `FLUX_EOT_TIMEOUT_MS` | No | Flux silence timeout for turn finalization in milliseconds (default: `1200`). |
 | `TALKER_CONTEXT_TURNS` | No | Number of recent conversational turns included for the Talker (default: `10`). Internally this maps to roughly `2 x turns` utterances. |
 | `LOG_SYSTEM_EVENTS` | No | Enable structured event logging to console (default: `true`). |
 | `LOG_SYSTEM_EVENTS_TO_FILE` | No | Enable NDJSON event logging to file (default: `true`). |
@@ -43,6 +47,10 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 CEREBRAS_API_KEY=csk-...
 CEREBRAS_TALKER_MODEL=gpt-oss-120b
 DEEPGRAM_API_KEY=af9ae...
+FLUX_TRANSCRIBE_TIMEOUT_MS=10000
+FLUX_EOT_THRESHOLD=0.35
+FLUX_EAGER_EOT_THRESHOLD=0.25
+FLUX_EOT_TIMEOUT_MS=1200
 TALKER_CONTEXT_TURNS=10
 LOG_SYSTEM_EVENTS=true
 LOG_SYSTEM_EVENTS_TO_FILE=true
@@ -273,6 +281,8 @@ Submit audio for speech-to-text transcription. The server transcribes via Deepgr
 ```
 
 The audio should be **linear16 PCM** encoded. `speakerId` is optional.
+
+The server normalizes incoming audio to Flux-compatible mono 16 kHz linear16 PCM before transcription, so callers can provide different sample rates/channels as long as the payload is linear16 PCM.
 
 **Response (speech detected):**
 

@@ -13,6 +13,11 @@ const PORT = Number(process.env.PORT ?? 8081);
 const DISCOVERY_ENABLED = (process.env.DISCOVERY_ENABLED ?? 'true').toLowerCase() !== 'false';
 const DISCOVERY_PORT = Number(process.env.DISCOVERY_PORT ?? 9876);
 const MAX_REQUEST_BODY_SIZE = '10mb';
+const FLUX_SAMPLE_RATE_HZ = 16000;
+const FLUX_TRANSCRIBE_TIMEOUT_MS = Number(process.env.FLUX_TRANSCRIBE_TIMEOUT_MS ?? 10000);
+const FLUX_EOT_THRESHOLD = process.env.FLUX_EOT_THRESHOLD ?? '0.35';
+const FLUX_EAGER_EOT_THRESHOLD = process.env.FLUX_EAGER_EOT_THRESHOLD ?? '0.25';
+const FLUX_EOT_TIMEOUT_MS = process.env.FLUX_EOT_TIMEOUT_MS ?? '1200';
 
 interface DiscoveryRequest {
   type?: string;
@@ -335,22 +340,181 @@ async function transcribeAudioBuffer(
     channels?: number;
   },
 ): Promise<string | null> {
-  const sampleRateHz = options?.sampleRateHz ?? 16000;
+  const sampleRateHz = options?.sampleRateHz ?? FLUX_SAMPLE_RATE_HZ;
   const channels = options?.channels ?? 1;
+  const normalizedAudio = normalizeAudioForFlux(audioBuffer, sampleRateHz, channels);
 
-  const request = {
-    model: 'nova-2',
+  const apiKey = process.env.DEEPGRAM_API_KEY;
+  if (!apiKey) {
+    return null;
+  }
+
+  const connectArgs: Parameters<typeof deepgram.listen.v2.connect>[0] = {
+    Authorization: `Token ${apiKey}`,
+    model: 'flux-general-en',
     encoding: 'linear16',
-    sample_rate: sampleRateHz,
-    channels,
-  } as unknown as Parameters<typeof deepgram.listen.v1.media.transcribeFile>[1];
+    sample_rate: String(FLUX_SAMPLE_RATE_HZ),
+  };
 
-  const result = await deepgram.listen.v1.media.transcribeFile(audioBuffer, request);
+  if (FLUX_EOT_THRESHOLD) {
+    connectArgs.eot_threshold = FLUX_EOT_THRESHOLD;
+  }
+  if (FLUX_EAGER_EOT_THRESHOLD) {
+    connectArgs.eager_eot_threshold = FLUX_EAGER_EOT_THRESHOLD;
+  }
+  if (FLUX_EOT_TIMEOUT_MS) {
+    connectArgs.eot_timeout_ms = FLUX_EOT_TIMEOUT_MS;
+  }
 
-  const transcript = 'results' in result
-    ? result.results?.channels[0]?.alternatives?.[0]?.transcript?.trim()
-    : undefined;
-  return transcript || null;
+  const connection = await deepgram.listen.v2.connect(connectArgs);
+
+  let latestTranscript = '';
+  let eagerEndOfTurnTranscript = '';
+  let endOfTurnTranscript = '';
+
+  const transcriptPromise = new Promise<string | null>((resolve) => {
+    let settled = false;
+
+    const resolveOnce = (value: string | null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(value);
+    };
+
+    const bestAvailableTranscript = (): string | null => {
+      const candidate = endOfTurnTranscript || eagerEndOfTurnTranscript || latestTranscript;
+      const cleaned = candidate.trim();
+      return cleaned || null;
+    };
+
+    const timeout = setTimeout(() => {
+      resolveOnce(bestAvailableTranscript());
+    }, FLUX_TRANSCRIBE_TIMEOUT_MS);
+
+    connection.on('message', (message) => {
+      if (message.type !== 'TurnInfo') {
+        return;
+      }
+
+      latestTranscript = message.transcript ?? latestTranscript;
+      if (message.event === 'EagerEndOfTurn') {
+        eagerEndOfTurnTranscript = message.transcript ?? eagerEndOfTurnTranscript;
+        return;
+      }
+
+      if (message.event === 'TurnResumed') {
+        eagerEndOfTurnTranscript = '';
+        return;
+      }
+
+      if (message.event === 'EndOfTurn') {
+        endOfTurnTranscript = message.transcript ?? endOfTurnTranscript;
+        clearTimeout(timeout);
+        resolveOnce(bestAvailableTranscript());
+      }
+    });
+
+    connection.on('error', () => {
+      clearTimeout(timeout);
+      resolveOnce(bestAvailableTranscript());
+    });
+
+    connection.on('close', () => {
+      clearTimeout(timeout);
+      resolveOnce(bestAvailableTranscript());
+    });
+  });
+
+  connection.connect();
+  await connection.waitForOpen();
+  connection.sendMedia(normalizedAudio);
+  connection.sendCloseStream({ type: 'Finalize' });
+
+  const transcript = await transcriptPromise;
+  connection.close();
+  return transcript;
+}
+
+function normalizeAudioForFlux(
+  audioBuffer: Buffer,
+  inputSampleRateHz: number,
+  inputChannels: number,
+): Buffer {
+  const sourceSampleRate = Number.isFinite(inputSampleRateHz) && inputSampleRateHz > 0
+    ? inputSampleRateHz
+    : FLUX_SAMPLE_RATE_HZ;
+  const sourceChannels = Number.isFinite(inputChannels) && inputChannels > 0
+    ? Math.floor(inputChannels)
+    : 1;
+
+  if (audioBuffer.length % 2 !== 0) {
+    throw new Error('Audio buffer must contain 16-bit PCM samples.');
+  }
+
+  const monoFloat = decodeLinear16ToMonoFloat32(audioBuffer, sourceChannels);
+  if (monoFloat.length === 0) {
+    return Buffer.alloc(0);
+  }
+
+  const resampledFloat = sourceSampleRate === FLUX_SAMPLE_RATE_HZ
+    ? monoFloat
+    : resampleLinear(monoFloat, sourceSampleRate, FLUX_SAMPLE_RATE_HZ);
+
+  return encodeFloat32ToLinear16(resampledFloat);
+}
+
+function decodeLinear16ToMonoFloat32(pcm16: Buffer, channels: number): Float32Array {
+  const totalSamples = pcm16.length / 2;
+  const frames = Math.floor(totalSamples / channels);
+  const mono = new Float32Array(frames);
+
+  let sampleIndex = 0;
+  for (let frame = 0; frame < frames; frame++) {
+    let mixed = 0;
+    for (let channel = 0; channel < channels; channel++) {
+      const sample = pcm16.readInt16LE(sampleIndex * 2) / 32768;
+      mixed += sample;
+      sampleIndex += 1;
+    }
+    mono[frame] = mixed / channels;
+  }
+
+  return mono;
+}
+
+function resampleLinear(input: Float32Array, fromHz: number, toHz: number): Float32Array {
+  if (input.length <= 1 || fromHz === toHz) {
+    return input;
+  }
+
+  const ratio = toHz / fromHz;
+  const outputLength = Math.max(1, Math.round(input.length * ratio));
+  const output = new Float32Array(outputLength);
+
+  for (let i = 0; i < outputLength; i++) {
+    const sourceIndex = i / ratio;
+    const leftIndex = Math.floor(sourceIndex);
+    const rightIndex = Math.min(leftIndex + 1, input.length - 1);
+    const weight = sourceIndex - leftIndex;
+
+    output[i] = input[leftIndex] * (1 - weight) + input[rightIndex] * weight;
+  }
+
+  return output;
+}
+
+function encodeFloat32ToLinear16(samples: Float32Array): Buffer {
+  const output = Buffer.alloc(samples.length * 2);
+
+  for (let i = 0; i < samples.length; i++) {
+    const clamped = Math.max(-1, Math.min(1, samples[i]));
+    const int16 = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+    output.writeInt16LE(int16, i * 2);
+  }
+
+  return output;
 }
 
 void bootstrap();

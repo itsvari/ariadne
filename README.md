@@ -122,6 +122,10 @@ The project includes **179 unit tests** across all 7 packages (~90% line coverag
 | `OPENROUTER_BASE_URL` | No | Override the OpenRouter base URL (default: `https://openrouter.ai/api/v1`). |
 | `CEREBRAS_API_KEY` | No | Cerebras API key. When set, the Thinker uses Cerebras instead of OpenRouter. |
 | `DEEPGRAM_API_KEY` | **Yes** (server) | API key for server-side TTS synthesis and STT transcription. |
+| `FLUX_TRANSCRIBE_TIMEOUT_MS` | No | Server-side Flux STT timeout in ms before returning best available transcript (default: `10000`). |
+| `FLUX_EOT_THRESHOLD` | No | Server-side Flux end-of-turn confidence threshold (default: `0.35`). |
+| `FLUX_EAGER_EOT_THRESHOLD` | No | Server-side Flux eager end-of-turn threshold (default: `0.25`). |
+| `FLUX_EOT_TIMEOUT_MS` | No | Server-side Flux silence timeout in ms for turn finalization (default: `1200`). |
 | `NEXT_PUBLIC_DEEPGRAM_API_KEY` | **Yes** (web) | API key for browser-side STT transcription in the control panel. |
 | `VALKEY_URL` | No | Valkey connection URL (default: `valkey://localhost:6379`). |
 | `NEXT_PUBLIC_SERVER_URL` | No | Server base URL for the web control panel (default: `http://localhost:8081`). |
