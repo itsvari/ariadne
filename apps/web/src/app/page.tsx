@@ -824,7 +824,7 @@ export default function AriadneControlPanel() {
       </header>
 
       {/* ── MAIN 3-COLUMN GRID ─────────────────────────────────────────── */}
-      <div className="flex-1 min-h-0 grid grid-cols-[280px_1fr_340px]">
+      <div className="flex-1 min-h-0 grid grid-cols-[280px_minmax(0,1fr)_340px]">
 
         {/* ── LEFT COLUMN: Session + Belief + Directives ───────────────── */}
         <div className="border-r border-[var(--border)] flex flex-col min-h-0 overflow-y-auto scroll-area">
@@ -966,7 +966,7 @@ export default function AriadneControlPanel() {
         </div>
 
         {/* ── CENTRE COLUMN: Conversation Feed ─────────────────────────── */}
-        <div className="flex flex-col min-h-0">
+        <div className="flex flex-col min-h-0 min-w-0 overflow-hidden">
           <div className="px-3 py-1.5 border-b border-[var(--border)] flex-shrink-0">
             <span className="section-header" style={{ border: 'none', margin: 0, padding: 0 }}>
               Conversation ({messages.length})
